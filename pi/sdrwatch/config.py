@@ -33,6 +33,21 @@ class SdrConfig:
     amp: bool = False
     auto_gain: bool = True
     ppm: float = 0.0
+    # Зовнішній ВЧ-тракт: список шляхів {name, start_hz, stop_hz, gpio:{pin:0/1}, bias_tee, lo_hz, gain_db}
+    # (див. frontend.py і docs/HARDWARE.md). Порожньо — антена напряму в SDR.
+    frontend: list = field(default_factory=list)
+
+
+@dataclass
+class FullBandConfig:
+    """Виявлення на всій ширині діапазону SDR (поза пріоритетними FPV-діапазонами)."""
+    enabled: bool = True
+    start_hz: float = 1e6
+    # 0 — до верхньої межі SDR (або конвертера, якщо він є у frontend)
+    stop_hz: float = 0.0
+    # Скільки сегментів «повного» діапазону сканувати між проходами пріоритетних діапазонів:
+    # FPV-діапазони оновлюються часто, решта ефіру — поступово
+    segments_per_cycle: int = 40
 
 
 @dataclass
@@ -97,6 +112,7 @@ class Config:
     longitude: float | None = None
     sdr: SdrConfig = field(default_factory=SdrConfig)
     dsp: DspConfig = field(default_factory=DspConfig)
+    full_band: FullBandConfig = field(default_factory=FullBandConfig)
     distance: DistanceConfig = field(default_factory=DistanceConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)

@@ -82,6 +82,11 @@ class _ControlTabState extends State<ControlTab> {
     final st = c['storage'] as Map<String, dynamic>;
     final nt = c['notify'] as Map<String, dynamic>;
     final ranges = (c['ranges'] as List).cast<Map<String, dynamic>>();
+    final fb = c['full_band'] as Map<String, dynamic>;
+    final full = ((l.status['ranges'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>()
+        .where((r) => r['full'] == true)
+        .firstOrNull;
     final mode = l.status['mode'] as String? ?? 'scan';
     final stats = l.status['stats'] as Map<String, dynamic>?;
 
@@ -146,6 +151,32 @@ class _ControlTabState extends State<ControlTab> {
               onPressed: () => _addRange(ranges),
             ),
           ),
+          SwitchListTile(
+            title: const Text('Повний діапазон SDR'),
+            subtitle: Text(
+              full == null
+                  ? 'Виявлення на всій ширині приймача (між проходами пріоритетних діапазонів)'
+                  : '${fmtFreq((full['start_hz'] as num).toDouble())} – ${fmtFreq((full['stop_hz'] as num).toDouble())}'
+                        ' · повний прохід ${full['pass_s'] ?? '…'} с',
+            ),
+            value: fb['enabled'] as bool,
+            onChanged: (v) => _patch({
+              'full_band': {'enabled': v},
+            }),
+          ),
+          if (fb['enabled'] == true)
+            _slider(
+              'Сегментів повного діапазону за цикл',
+              (fb['segments_per_cycle'] as num).toDouble(),
+              10,
+              200,
+              19,
+              '',
+              (v) => _patch({
+                'full_band': {'segments_per_cycle': v.round()},
+              }),
+              help: 'Більше — швидше оглядається весь ефір, але рідше оновлюються FPV-діапазони',
+            ),
 
           _h('Приймач'),
           SwitchListTile(

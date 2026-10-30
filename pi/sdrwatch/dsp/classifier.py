@@ -30,6 +30,7 @@ CLASSES: dict[str, tuple[str, int, bool]] = {
     "wifi": ("Wi-Fi / OFDM-пакети", 0, False),
     "wideband_unknown": ("Невідомий широкосмуговий сигнал", 1, False),
     "carrier": ("Несуча / вузькосмуговий сигнал", 0, False),
+    "known_service": ("Відома служба (мовлення, мобільний зв'язок…)", 0, False),
     "unknown": ("Невідомий сигнал", 0, False),
 }
 
@@ -124,6 +125,11 @@ def classify(freq_hz: float, bw_hz: float, flatness: float, edge_db_per_mhz: flo
 
     cv = iqf.envelope_cv if iqf else None
     duty = iqf.duty if iqf else presence
+
+    # 1а. Поза FPV-діапазонами і в смузі відомої служби — фон (FM, ТБ, GSM/LTE, GNSS…)
+    svc = ch.service_for(freq_hz)
+    if svc is not None and not (kinds & {"video", "control"}):
+        return Classification("known_service", 0.7, svc.name, [])
 
     # 2. Вузькосмугові стрибкоподібні — лінки керування
     if mhz < 3.0:

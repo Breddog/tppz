@@ -91,6 +91,35 @@ LINK_RANGES: list[LinkRange] = [
 ]
 
 
+# Відомі «фонові» служби: на повному діапазоні вони завжди є в ефірі й не є загрозою.
+# Сигнали тут класифікуються як known_service (без сповіщень), якщо не схожі на FPV-відео/керування.
+SERVICE_RANGES: list[LinkRange] = [
+    LinkRange("КХ / СВ / ДВ мовлення", 0.1e6, 30e6, "service"),
+    LinkRange("FM-радіо", 87.5e6, 108e6, "service"),
+    LinkRange("Авіація (AM)", 108e6, 137e6, "service"),
+    LinkRange("Метеосупутники / УКХ зв'язок", 137e6, 174e6, "service"),
+    LinkRange("DAB / ТБ VHF", 174e6, 240e6, "service"),
+    LinkRange("ТБ DVB-T2", 470e6, 790e6, "service"),
+    LinkRange("LTE 800 (база)", 791e6, 821e6, "service"),
+    LinkRange("GSM/LTE 900 (база)", 925e6, 960e6, "service"),
+    LinkRange("ADS-B / DME / SSR", 960e6, 1215e6, "service"),
+    LinkRange("GNSS (GPS/Galileo/ГЛОНАСС)", 1164e6, 1300e6, "service"),
+    LinkRange("Inmarsat / Iridium", 1525e6, 1660e6, "service"),
+    LinkRange("GSM/LTE 1800 (база)", 1805e6, 1880e6, "service"),
+    LinkRange("UMTS/LTE 2100 (база)", 2110e6, 2170e6, "service"),
+    LinkRange("LTE 2600 (база)", 2620e6, 2690e6, "service"),
+    LinkRange("Радари S-діапазону", 2700e6, 3100e6, "service"),
+    LinkRange("5G NR n78", 3400e6, 3800e6, "service"),
+]
+
+
+def service_for(freq_hz: float) -> LinkRange | None:
+    for r in SERVICE_RANGES:
+        if r.start_hz <= freq_hz <= r.stop_hz:
+            return r
+    return None
+
+
 @dataclass
 class ChannelMatch:
     channel: Channel

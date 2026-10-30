@@ -22,6 +22,7 @@ import numpy as np
 from . import channels as ch
 from . import distance as dist
 from .dsp import classifier, spectrum, video
+from .frontend import FrontEnd
 from .hub import Hub
 from .imaging import ClipWriter, encode
 from .notifier import Notifier
@@ -31,6 +32,8 @@ from .tracker import Track, Tracker
 log = logging.getLogger(__name__)
 
 SPECTRUM_POINTS = 1024
+FULL_SPECTRUM_POINTS = 2048
+FULL_BAND_INDEX = 100       # індекс панорами «Повний діапазон» (поза списком cfg.ranges)
 MAX_ANALYSES_PER_SWEEP = 2
 
 
@@ -49,6 +52,10 @@ class Panorama:
     wf_rows: list = field(default_factory=list)
     wf_last_save: float = field(default_factory=time.time)
     sweeps: int = 0
+    full: bool = False          # «повний діапазон» — сканується порціями між пріоритетними
+    cursor: int = 0
+    pass_started: float = field(default_factory=time.time)
+    pass_s: float = 0.0         # тривалість останнього повного проходу
 
     def freqs(self, sl: slice) -> np.ndarray:
         return self.start_hz + (np.arange(sl.start, sl.stop) + 0.5) * self.bin_hz
@@ -74,6 +81,7 @@ class Engine:
     def __init__(self, cfg, source, storage: Storage, notifier: Notifier | None, hub: Hub) -> None:
         self.cfg = cfg
         self.src = source
+        self._inverted = False
         self.storage = storage
         self.notifier = notifier
         self.hub = hub
@@ -95,6 +103,7 @@ class Engine:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self.gain = [cfg.sdr.lna_gain, cfg.sdr.vga_gain, cfg.sdr.amp]
+        self.fe = FrontEnd(cfg.sdr.frontend, source)
         self.last_spectrum: dict[int, dict] = {}
         self._need_plan = False
         self._calls: queue.Queue = queue.Queue()
@@ -200,6 +209,20 @@ class Engine:
             pans.append(Panorama(i, r.name, lo, hi, bin_hz, centers, usable,
                                  np.full(nb, np.nan, np.float32), np.full(nb, -200.0, np.float32),
                                  spectrum.NoiseFloorTracker(nb)))
+        fb = self.cfg.full_band
+        if fb.enabled:
+            lo = max(fb.start_hz, self.src.min_freq_hz)
+            hi = fb.stop_hz or self.fe.max_freq_hz(self.src.max_freq_hz)
+            # Сегменти, які вже повністю покриті пріоритетними діапазонами, не дублюємо
+            covered = [(p.start_hz, p.stop_hz) for p in pans]
+            n_seg = max(1, math.ceil((hi - lo) / step))
+            centers = [c for c in (lo + step / 2 + k * step for k in range(n_seg))
+                       if not any(a <= c - step / 2 and c + step / 2 <= b for a, b in covered)]
+            nb = int(math.ceil((hi - lo) / bin_hz))
+            if centers:
+                pans.append(Panorama(FULL_BAND_INDEX, "Повний діапазон", lo, hi, bin_hz, centers, usable,
+                                     np.full(nb, np.nan, np.float32), np.full(nb, -200.0, np.float32),
+                                     spectrum.NoiseFloorTracker(nb), full=True))
         self.panoramas = pans
         self._need_plan = False
 
@@ -260,12 +283,21 @@ class Engine:
     @property
     def gain_offset_db(self) -> float:
         """Поправка dBFS → dBm (приблизно; уточнюється калібруванням)."""
-        return -self.src.total_gain_db + self.cfg.distance.rx_cal_db
+        return -self.src.total_gain_db - self.fe.external_gain_db + self.cfg.distance.rx_cal_db
+
+    def _tune(self, rf_hz: float) -> None:
+        """Налаштування з урахуванням зовнішнього тракту (комутатор антен, LNA, конвертер)."""
+        self.fe.tune(rf_hz)
+
+    def _read(self, n: int) -> np.ndarray:
+        iq = self.src.read(n)
+        # Конвертер із гетеродином вище сигналу дзеркалить спектр — повертаємо як в ефірі
+        return np.conj(iq) if self.fe.inverted else iq
 
     def _capture_spectrum(self, center: float) -> tuple[np.ndarray, np.ndarray]:
         d = self.cfg.dsp
-        self.src.tune(center)
-        iq = self.src.read(d.fft_size * (d.averages + 1))
+        self._tune(center)
+        iq = self._read(d.fft_size * (d.averages + 1))
         self._agc(iq)
         s = spectrum.remove_dc(spectrum.psd_db(iq, d.fft_size, d.averages)) + self.gain_offset_db
         return s, iq
@@ -291,7 +323,11 @@ class Engine:
         n = d.fft_size
         crop0 = (n - pano.usable_bins) // 2
         dets: list[spectrum.Detection] = []
-        for c in pano.centers:
+        centers = pano.centers
+        if pano.full:
+            k = max(1, self.cfg.full_band.segments_per_cycle)
+            centers = pano.centers[pano.cursor:pano.cursor + k]
+        for c in centers:
             if self._interrupted():
                 return
             s, _ = self._capture_spectrum(c)
@@ -302,9 +338,24 @@ class Engine:
             pano.peak_hold[psl] = np.maximum(pano.peak_hold[psl] - 0.2, seg)
             floor = pano.floor.update(psl, seg)
             dets += spectrum.detect(seg, floor, pano.freqs(psl), d.threshold_db, d.min_bandwidth_hz)
-        pano.sweeps += 1
+        lo_hz, hi_hz, timeout = pano.start_hz, pano.stop_hz, None
+        if pano.full:
+            half = pano.usable_bins * pano.bin_hz / 2
+            lo_hz, hi_hz = centers[0] - half, centers[-1] + half
+            pano.cursor += len(centers)
+            if pano.cursor >= len(pano.centers):
+                pano.cursor = 0
+                pano.sweeps += 1
+                pano.pass_s = time.time() - pano.pass_started
+                pano.pass_started = time.time()
+            # Сюди повертаємось лише раз за повний прохід — втрата лише після кількох пропусків
+            timeout = max(self.cfg.dsp.lost_timeout_s, 2.5 * (pano.pass_s or 30.0))
+        else:
+            pano.sweeps += 1
         dets = spectrum.absorb_satellites(spectrum.merge_edge_detections(dets))
-        to_analyze = self.tracker.update(dets, pano.name, pano.start_hz, pano.stop_hz, 0.0)
+        to_analyze = self.tracker.update(dets, pano.name, lo_hz, hi_hz, 0.0, lost_timeout_s=timeout)
+        if pano.full:
+            to_analyze += self._confirm_in_place(pano, lo_hz, hi_hz, timeout)
         # Спершу — нові та широкосмугові (відео) сигнали
         to_analyze.sort(key=lambda t: (t.classification is not None, -t.bandwidth_hz))
         for t in to_analyze[:MAX_ANALYSES_PER_SWEEP]:
@@ -320,6 +371,21 @@ class Engine:
         self._publish_spectrum(pano)
         self._store_waterfall(pano)
 
+    def _confirm_in_place(self, pano: Panorama, lo: float, hi: float, timeout: float | None) -> list[Track]:
+        """На повному діапазоні до сегмента повертаємось лише раз за прохід, тому нового кандидата
+        підтверджуємо одразу повторними замірами — шумовий сплеск їх не пройде."""
+        out: list[Track] = []
+        for t in list(self.tracker.tracks.values()):
+            if t.state != "candidate" or t.range_name != pano.name or not (lo <= t.freq_hz <= hi):
+                continue
+            for _ in range(self.cfg.dsp.confirm_hits - 1):
+                found = self._probe(t.freq_hz, t.bandwidth_hz * 0.3, max_off=max(1e6, t.bandwidth_hz / 2))
+                if found is None:
+                    break
+                out += self.tracker.update([found], pano.name, found.freq_hz - 1, found.freq_hz + 1, 0.0,
+                                           lost_timeout_s=timeout)
+        return [t for t in out if t.state == "confirmed"]
+
     # ---- аналіз сигналу ----------------------------------------------------------------
     def _analyze(self, t: Track, record_frames: int = 0) -> np.ndarray | None:
         fs = self.src.sample_rate
@@ -328,13 +394,13 @@ class Engine:
         if t.fhss_key:
             # Для FHSS аналізуємо проміжок, де був останній «стрибок»
             center = t.hop_freqs[-1] if t.hop_freqs else t.freq_hz
-            self.src.tune(center)
-            iq = self.src.read(int(fs * 0.01))
+            self._tune(center)
+            iq = self._read(int(fs * 0.01))
             iqf = classifier.iq_features(iq, fs, 0.0, t.hop_bw_hz or 1e6)
             res = None
         else:
-            self.src.tune(t.freq_hz)
-            iq = self.src.read(int(fs * self.cfg.dsp.video_capture_s))
+            self._tune(t.freq_hz)
+            iq = self._read(int(fs * self.cfg.dsp.video_capture_s))
             iqf = classifier.iq_features(iq, fs, 0.0, t.bandwidth_hz)
             res = None
             kinds = {r.kind for r in ch.link_ranges_for(t.freq_hz)}
@@ -380,9 +446,9 @@ class Engine:
         fs = self.src.sample_rate
         clip = ClipWriter(self.storage, t.freq_hz, t.classification.label, event_id, max_s=60)
         try:
-            self.src.tune(t.freq_hz)
+            self._tune(t.freq_hz)
             for _ in range(4):
-                iq = self.src.read(int(fs * self.cfg.dsp.video_capture_s))
+                iq = self._read(int(fs * self.cfg.dsp.video_capture_s))
                 r = video.demodulate(iq, fs, 0.0, force_invert=self.video_opts["invert"],
                                      descramble=self.video_opts["descramble"])
                 if r.image is not None:
@@ -447,7 +513,7 @@ class Engine:
                     self._flush_events()
                     return
 
-    def _probe(self, freq: float, bw: float) -> spectrum.Detection | None:
+    def _probe(self, freq: float, bw: float, max_off: float = 5e6) -> spectrum.Detection | None:
         d = self.cfg.dsp
         s, _ = self._capture_spectrum(freq)
         n = len(s)
@@ -455,18 +521,31 @@ class Engine:
         s = s[crop:n - crop]
         fs = self.src.sample_rate
         freqs = freq + (np.arange(len(s)) - len(s) / 2 + 0.5) * fs / n
-        floor = spectrum.local_floor(s)
+        floor = self._known_floor(freqs)
+        if floor is None:
+            floor = spectrum.local_floor(s)
         dets = spectrum.detect(s, floor, freqs, d.threshold_db, d.min_bandwidth_hz)
-        near = [x for x in dets if abs(x.freq_hz - freq) < 5e6 and x.bandwidth_hz > bw * 0.4]
+        near = [x for x in dets if abs(x.freq_hz - freq) < max_off and x.bandwidth_hz > bw * 0.4]
         return max(near, key=lambda x: x.snr_db) if near else None
+
+    def _known_floor(self, freqs: np.ndarray) -> np.ndarray | None:
+        """Рівень шуму з панорами (якщо частоти вже скановано): широкий сигнал на весь сегмент
+        не підніме поріг, як було б з миттєвою оцінкою лише по цьому сегменту."""
+        for p in sorted(self.panoramas, key=lambda p: p.full):
+            if p.start_hz <= freqs[0] and freqs[-1] <= p.stop_hz:
+                idx = ((freqs - p.start_hz) / p.bin_hz).astype(int).clip(0, len(p.spec) - 1)
+                f = p.floor.get(slice(0, len(p.spec)))[idx]
+                if not np.isnan(f).any():
+                    return f.astype(np.float32)
+        return None
 
     # ---- стеження / живе відео ------------------------------------------------------------
     def _watch_step(self) -> None:
         fs = self.src.sample_rate
         d = self.cfg.dsp
         f = self.watch_freq
-        self.src.tune(f)
-        iq = self.src.read(int(fs * d.video_capture_s))
+        self._tune(f)
+        iq = self._read(int(fs * d.video_capture_s))
         self._agc(iq)
         s = spectrum.remove_dc(spectrum.psd_db(iq[: d.fft_size * (d.averages + 1)], d.fft_size, d.averages))
         s = s + self.gain_offset_db
@@ -521,20 +600,32 @@ class Engine:
 
     # ---- публікація ----------------------------------------------------------------------
     def _spectrum_msg(self, idx: int, name: str, f0: float, f1: float, spec: np.ndarray,
-                      floor: np.ndarray) -> dict:
+                      floor: np.ndarray, points: int = SPECTRUM_POINTS) -> dict:
         spec = np.where(np.isnan(spec), floor, spec)
         spec = np.nan_to_num(spec, nan=-140.0)
         floor = np.nan_to_num(floor, nan=-140.0)
         return {
             "type": "spectrum", "range": idx, "name": name, "f_start": f0, "f_stop": f1, "ts": time.time(),
-            "bins": np.round(spectrum.downsample_max(spec, SPECTRUM_POINTS), 1).tolist(),
-            "floor": np.round(_downsample_mean(floor, SPECTRUM_POINTS), 1).tolist(),
+            "bins": np.round(spectrum.downsample_max(spec, points), 1).tolist(),
+            "floor": np.round(_downsample_mean(floor, points), 1).tolist(),
             "threshold_db": self.cfg.dsp.threshold_db,
         }
 
     def _publish_spectrum(self, pano: Panorama) -> None:
-        floor = pano.floor.get(slice(0, len(pano.spec)))
-        msg = self._spectrum_msg(pano.index, pano.name, pano.start_hz, pano.stop_hz, pano.spec, floor)
+        spec, floor = pano.spec, pano.floor.get(slice(0, len(pano.spec)))
+        if pano.full:
+            # Повна панорама показує й пріоритетні діапазони (їх скануємо окремо, частіше)
+            spec, floor = spec.copy(), floor.copy()
+            for p in self.panoramas:
+                if p.full:
+                    continue
+                i0 = int(round((p.start_hz - pano.start_hz) / pano.bin_hz))
+                a, b = max(0, i0), min(len(spec), i0 + len(p.spec))
+                if b > a:
+                    spec[a:b] = p.spec[a - i0:b - i0]
+                    floor[a:b] = p.floor.get(slice(a - i0, b - i0))
+        msg = self._spectrum_msg(pano.index, pano.name, pano.start_hz, pano.stop_hz, spec, floor,
+                                 FULL_SPECTRUM_POINTS if pano.full else SPECTRUM_POINTS)
         self.last_spectrum[pano.index] = msg
         self.hub.publish("live", msg)
 
@@ -542,7 +633,7 @@ class Engine:
         self.hub.publish("live", {"type": "signals", "signals": self.signals(), "ts": time.time()})
 
     def _store_waterfall(self, pano: Panorama) -> None:
-        if not self.cfg.storage.save_waterfall:
+        if not self.cfg.storage.save_waterfall or (pano.full and pano.cursor != 0):
             return
         row = spectrum.downsample_max(np.nan_to_num(pano.spec, nan=-140.0), SPECTRUM_POINTS)
         pano.wf_rows.append((time.time(), row))
@@ -566,7 +657,9 @@ class Engine:
             "sdr": self.src.info(),
             "sample_rate": self.src.sample_rate,
             "ranges": [{"index": p.index, "name": p.name, "start_hz": p.start_hz, "stop_hz": p.stop_hz,
-                        "segments": len(p.centers), "sweeps": p.sweeps} for p in self.panoramas],
+                        "segments": len(p.centers), "sweeps": p.sweeps, "full": p.full,
+                        "pass_s": round(p.pass_s, 1) if p.full else None} for p in self.panoramas],
+            "frontend": self.fe.info(),
             "stats": self.stats,
             "uptime_s": round(time.time() - self.stats["started"]),
             "active_signals": sum(1 for t in self.tracker.tracks.values() if t.state == "confirmed"),

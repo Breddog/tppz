@@ -154,9 +154,11 @@ class Tracker:
         return best
 
     def update(self, dets: list[Detection], range_name: str, lo_hz: float, hi_hz: float,
-               gain_offset_db: float, now: float | None = None) -> list[Track]:
+               gain_offset_db: float, now: float | None = None,
+               lost_timeout_s: float | None = None) -> list[Track]:
         """Оновити треки результатами одного проходу діапазону. Повертає треки, що потребують аналізу."""
         now = time.time() if now is None else now
+        lost_timeout = self.lost_timeout_s if lost_timeout_s is None else lost_timeout_s
         seen: set[str] = set()
         for d in dets:
             t = self._match(d, range_name)
@@ -203,7 +205,7 @@ class Tracker:
             t.presence *= 0.8
             if t.state == "candidate" and t.misses - t.hits > self.confirm_hits + 1:
                 del self.tracks[t.id]  # шум — тихо прибрати
-            elif t.state == "confirmed" and now - t.last_seen > self.lost_timeout_s:
+            elif t.state == "confirmed" and now - t.last_seen > lost_timeout:
                 t.state = "lost"
                 self._emit("lost", t)
             elif t.state == "lost" and now - t.last_seen > 600:

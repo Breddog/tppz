@@ -232,5 +232,6 @@ const Map<String, String> kClassNames = {
   'wifi': 'Wi-Fi',
   'wideband_unknown': 'Широкосмуговий',
   'carrier': 'Несуча',
+  'known_service': 'Відома служба',
   'unknown': 'Невідомий',
 };

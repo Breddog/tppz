@@ -87,35 +87,40 @@ class NoiseFloorTracker:
     """Довготривала оцінка шуму для панорами (кожен бін окремо).
 
     Вниз — швидко (сигнал зник → шум одразу видно), вгору — дуже повільно
-    (безперервні сигнали не «вбудовуються» в шум). Додатково обмежено глобальним
-    опорним рівнем панорами + margin.
+    (безперервні сигнали не «вбудовуються» в шум). Додатково обмежено опорним
+    рівнем околу (±region_bins) + margin: широкий сигнал на весь сегмент не піднімає
+    поріг, а на повному діапазоні 0–6 ГГц враховується, що власний шум SDR різний
+    на різних частотах.
     """
 
-    def __init__(self, n_bins: int, down: float = 0.5, up: float = 0.01, margin_db: float = 6.0) -> None:
+    def __init__(self, n_bins: int, down: float = 0.5, up: float = 0.01, margin_db: float = 6.0,
+                 region_bins: int = 8000) -> None:
         self.floor = np.full(n_bins, np.nan, dtype=np.float32)
+        self.ref = np.full(n_bins, np.nan, dtype=np.float32)
         self.down, self.up, self.margin = down, up, margin_db
-        self.global_ref: float | None = None
+        self.region = region_bins
+
+    @property
+    def global_ref(self) -> float | None:
+        v = self.ref[~np.isnan(self.ref)]
+        return float(np.median(v)) if v.size else None
 
     def update(self, sl: slice, spec_db: np.ndarray) -> np.ndarray:
         inst = local_floor(spec_db)
         cur = self.floor[sl]
-        fresh = np.isnan(cur)
-        cur = np.where(fresh, inst, cur)
+        cur = np.where(np.isnan(cur), inst, cur)
         alpha = np.where(inst < cur, self.down, self.up)
         cur = cur + alpha * (inst - cur)
         self.floor[sl] = cur
-        valid = self.floor[~np.isnan(self.floor)]
-        if valid.size:
-            ref = float(np.percentile(valid, 20))
-            self.global_ref = ref if self.global_ref is None else 0.9 * self.global_ref + 0.1 * ref
-            cur = np.minimum(cur, self.global_ref + self.margin)
-        return cur
+        near = self.floor[max(0, sl.start - self.region): sl.stop + self.region]
+        near = near[~np.isnan(near)]
+        ref = float(np.percentile(near, 20))
+        old = self.ref[sl]
+        self.ref[sl] = np.where(np.isnan(old), ref, 0.9 * old + 0.1 * ref)
+        return np.minimum(cur, self.ref[sl] + self.margin)
 
     def get(self, sl: slice) -> np.ndarray:
-        f = self.floor[sl]
-        if self.global_ref is not None:
-            f = np.minimum(f, self.global_ref + self.margin)
-        return f
+        return np.fmin(self.floor[sl], self.ref[sl] + self.margin)
 
 
 @dataclass

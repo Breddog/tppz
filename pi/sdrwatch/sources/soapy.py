@@ -96,6 +96,15 @@ class SoapySource(SdrSource):
             self.dev.setGain(self._rx, 0, float(lna + vga))
         self.lna_gain, self.vga_gain, self.amp = lna, vga, amp
 
+    def set_bias_tee(self, on: bool) -> None:
+        """Живлення зовнішнього LNA по коаксіалу (HackRF: 3.3 В, до 50 мА)."""
+        for key in ("bias_tx", "biastee", "bias_tee"):
+            try:
+                self.dev.writeSetting(key, "true" if on else "false")
+                return
+            except Exception:  # noqa: BLE001 — назва налаштування залежить від драйвера
+                continue
+
     def _flush(self, ms: float = 2.0) -> None:
         if self.sample_rate:
             self.read(int(self.sample_rate * ms / 1000), timeout_us=20000)
