@@ -107,6 +107,10 @@ class ChannelMatch:
         }
 
 
+# Рідковживані сітки програють популярним (R, F, A, B, E), якщо відхилення схожі
+BAND_PENALTY_HZ = {"L": 1.5e6, "U": 1.5e6, "O": 1.5e6, "H": 1.5e6, "1G3": 0.5e6}
+
+
 def match_channel(freq_hz: float, bandwidth_hz: float = 0.0, kind: str | None = None,
                   tolerance_hz: float = 4 * MHZ) -> ChannelMatch | None:
     """Найближчий відомий канал у межах допуску.
@@ -114,28 +118,18 @@ def match_channel(freq_hz: float, bandwidth_hz: float = 0.0, kind: str | None = 
     kind: "analog" / "digital" / "wifi" — обмежити тип сітки.
     Для цифрових сигналів ширина смуги допомагає обрати 20 чи 40 МГц сітку.
     """
-    best: ChannelMatch | None = None
-    for ch in ALL_CHANNELS:
-        if kind and ch.kind != kind:
-            continue
-        off = freq_hz - ch.freq_hz
-        if abs(off) > tolerance_hz:
-            continue
-        score = abs(off)
-        band = BAND_BY_CODE[ch.band]
+    def score(c: Channel) -> float:
+        band = BAND_BY_CODE[c.band]
+        s = abs(freq_hz - c.freq_hz) + BAND_PENALTY_HZ.get(c.band, 0.0)
         if bandwidth_hz and band.kind != "analog":
-            score += abs(band.bandwidth_hz - bandwidth_hz) * 0.05
-        if best is None or score < _score(best, bandwidth_hz):
-            best = ChannelMatch(ch, off)
-    return best
+            s += abs(band.bandwidth_hz - bandwidth_hz) * 0.05
+        return s
 
-
-def _score(m: ChannelMatch, bw: float) -> float:
-    band = BAND_BY_CODE[m.channel.band]
-    s = abs(m.offset_hz)
-    if bw and band.kind != "analog":
-        s += abs(band.bandwidth_hz - bw) * 0.05
-    return s
+    cands = [c for c in ALL_CHANNELS if (not kind or c.kind == kind) and abs(freq_hz - c.freq_hz) <= tolerance_hz]
+    if not cands:
+        return None
+    best = min(cands, key=score)
+    return ChannelMatch(best, freq_hz - best.freq_hz)
 
 
 def all_matches(freq_hz: float, tolerance_hz: float = 4 * MHZ) -> list[ChannelMatch]:
