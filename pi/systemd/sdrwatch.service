@@ -1,0 +1,20 @@
+[Unit]
+Description=SDR Watch — сканер сигналів FPV
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sdrwatch
+Group=plugdev
+Environment=SDRWATCH_CONFIG=/etc/sdrwatch/config.json
+ExecStart=/opt/sdrwatch/venv/bin/python -m sdrwatch run
+WorkingDirectory=/opt/sdrwatch
+Restart=always
+RestartSec=3
+# Пріоритет для обробки сигналу
+Nice=-5
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

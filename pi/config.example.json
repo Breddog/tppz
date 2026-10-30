@@ -1,0 +1,11 @@
+{
+  "name": "Пост-1 (дах)",
+  "latitude": 50.45,
+  "longitude": 30.52,
+  "sdr": {"driver": "soapy", "device_args": "driver=hackrf", "sample_rate": 20000000, "lna_gain": 32, "vga_gain": 30, "amp": false, "auto_gain": true},
+  "dsp": {"fft_size": 1024, "averages": 8, "threshold_db": 8, "confirm_hits": 3, "lost_timeout_s": 6},
+  "distance": {"path_loss_exponent": 2.2, "rx_antenna_gain_dbi": 2, "rx_cal_db": 35},
+  "storage": {"path": "/var/lib/sdrwatch", "quota_mb": 4096, "record_video": true, "video_clip_s": 8},
+  "notify": {"enabled": true, "min_priority": 1, "ntfy_url": "https://ntfy.sh/zminit-na-sviy-sekretnyi-topik", "cooldown_s": 120},
+  "api": {"host": "0.0.0.0", "port": 8080, "token": ""}
+}

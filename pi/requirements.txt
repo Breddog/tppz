@@ -1,0 +1,8 @@
+numpy>=1.24
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pillow>=9.0
+# необов'язково:
+qrcode>=7.0        # QR-код для сполучення з телефоном у терміналі
+zeroconf>=0.120    # mDNS-оголошення в локальній мережі
+# SoapySDR ставиться з apt: python3-soapysdr soapysdr-module-hackrf (див. install.sh)
