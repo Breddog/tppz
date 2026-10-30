@@ -11,11 +11,12 @@ import os
 import time
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import __version__
 from . import channels as ch
+from .discovery import pairing_payload
 from .imaging import read_clip_frame
 
 
@@ -58,6 +59,13 @@ def create_app(app_state) -> FastAPI:
     """app_state: об'єкт з полями cfg, engine, storage, hub, device_id."""
     app = FastAPI(title="SDR Watch", version=__version__)
     st = app_state
+    started = time.monotonic()
+
+    def pairing_left() -> int:
+        w = st.cfg.api.pairing_window_s
+        return max(0, int(w - (time.monotonic() - started))) if w > 0 else 0
+
+    app.state.pairing_open = lambda: pairing_left() > 0
 
     def check_token(token: str | None) -> None:
         if not token or not hmac.compare_digest(token, st.cfg.api.token):
@@ -71,6 +79,35 @@ def create_app(app_state) -> FastAPI:
     @app.get("/api/ping")
     def ping():
         return {"app": "sdrwatch", "name": st.cfg.name, "id": st.device_id, "version": __version__}
+
+    # ---- сполучення з телефоном без монітора й SSH ------------------------------------
+    @app.get("/api/pair")
+    def pair(request: Request):
+        """Перші N хвилин після ввімкнення віддає токен застосунку (лише в локальній мережі)."""
+        if pairing_left() <= 0:
+            raise HTTPException(403, "Вікно сполучення закрите. Перезавантажте модуль (вимкніть і ввімкніть "
+                                     "живлення) і додайте його протягом 15 хвилин, або відскануйте QR з sdrwatch pair")
+        return pairing_payload(st.cfg, request.url.hostname)
+
+    @app.get("/", response_class=HTMLResponse)
+    def home(request: Request):
+        left = pairing_left()
+        qr_svg, payload = "", ""
+        if left > 0:
+            import json
+            payload = json.dumps(pairing_payload(st.cfg, request.url.hostname), ensure_ascii=False,
+                                 separators=(",", ":"))
+            qr_svg = _qr_svg(payload)
+        s = st.engine.status()
+        return _HOME.format(
+            name=_esc(st.cfg.name), version=__version__, sdr=_esc(s["sdr"]["name"]), mode=s["mode"],
+            active=s["active_signals"], temp=s["cpu_temp_c"] or "—",
+            pairing=(f'<p>Сполучення відкрите ще <b>{left // 60} хв {left % 60} с</b>. У застосунку натисніть '
+                     f'«Додати модуль» → «Знайти в локальній мережі» або відскануйте QR:</p>'
+                     f'<div class="qr">{qr_svg or "<pre>" + _esc(payload) + "</pre>"}</div>')
+            if left > 0 else
+            '<p>Вікно сполучення закрите. Щоб додати телефон: вимкніть і ввімкніть живлення модуля '
+            'та протягом 15 хвилин додайте його в застосунку.</p>')
 
     # ---- стан і сигнали -----------------------------------------------------------------
     @app.get("/api/status", dependencies=[Depends(auth)])
@@ -314,3 +351,32 @@ async def _client_opts(ws: WebSocket, sub) -> None:
                 sub.options["range"] = m["range"]
     except Exception:  # noqa: BLE001 — з'єднання закрито
         return
+
+
+def _esc(v) -> str:
+    import html
+    return html.escape(str(v))
+
+
+def _qr_svg(data: str) -> str:
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ImportError:
+        return ""
+    import io
+    img = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return buf.getvalue().decode().split("?>", 1)[-1]
+
+
+_HOME = """<!doctype html><html lang="uk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{name} · SDR Watch</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px;background:#0b0d12;color:#e3ecee}}
+main{{max-width:520px;margin:auto}}h1{{font-size:22px}}.qr{{background:#fff;padding:12px;border-radius:8px;
+display:inline-block}}.qr svg{{width:260px;height:260px}}dl{{display:grid;grid-template-columns:auto 1fr;gap:4px 16px}}
+dt{{color:#93a6ad}}pre{{white-space:pre-wrap;word-break:break-all;color:#111}}</style></head><body><main>
+<h1>{name}</h1><dl><dt>Версія</dt><dd>{version}</dd><dt>Приймач</dt><dd>{sdr}</dd><dt>Режим</dt><dd>{mode}</dd>
+<dt>Активних сигналів</dt><dd>{active}</dd><dt>Температура CPU</dt><dd>{temp} °C</dd></dl>
+<h2>Підключення телефону</h2>{pairing}</main></body></html>"""

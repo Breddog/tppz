@@ -103,6 +103,9 @@ class ApiConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     token: str = ""
+    # Скільки секунд після ввімкнення модуль сам видає токен застосунку в локальній мережі
+    # (сполучення без монітора й SSH). 0 — вимкнено, лише QR з `sdrwatch pair`.
+    pairing_window_s: int = 900
 
 
 @dataclass

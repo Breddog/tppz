@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -12,28 +11,12 @@ import sys
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, Config
-from .discovery import DiscoveryResponder, local_ips, register_mdns
+from .discovery import DiscoveryResponder, device_id_for, pairing_payload, register_mdns
 
 
 class AppState:
     def __init__(self, cfg, engine, storage, hub, device_id):
         self.cfg, self.engine, self.storage, self.hub, self.device_id = cfg, engine, storage, hub, device_id
-
-
-def device_id_for(cfg: Config) -> str:
-    try:
-        with open("/proc/cpuinfo") as f:
-            serial = [ln.split(":")[1].strip() for ln in f if ln.startswith("Serial")]
-    except OSError:
-        serial = []
-    base = serial[0] if serial else cfg.api.token
-    return "sdr-" + hashlib.sha1(base.encode()).hexdigest()[:10]
-
-
-def pairing_payload(cfg: Config, host: str | None = None) -> dict:
-    ips = [host] if host else local_ips()
-    return {"app": "sdrwatch", "n": cfg.name, "id": device_id_for(cfg),
-            "u": [f"http://{ip}:{cfg.api.port}" for ip in ips], "t": cfg.api.token}
 
 
 def cmd_pair(args) -> None:
@@ -77,9 +60,9 @@ def cmd_run(args) -> None:
     engine = Engine(cfg, src, storage, notifier, hub)
     engine.start()
     dev_id = device_id_for(cfg)
-    DiscoveryResponder(lambda: cfg.name, dev_id, cfg.api.port).start()
-    zc = register_mdns(cfg.name, cfg.api.port, dev_id)
     app = create_app(AppState(cfg, engine, storage, hub, dev_id))
+    DiscoveryResponder(lambda: cfg.name, dev_id, cfg.api.port, app.state.pairing_open).start()
+    zc = register_mdns(cfg.name, cfg.api.port, dev_id)
 
     def shutdown(*_):
         engine.stop()

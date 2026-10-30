@@ -96,6 +96,21 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     if (mounted) setState(() => _searching = false);
   }
 
+  /// Перші 15 хв після ввімкнення модуль сам віддає токен у локальній мережі.
+  Future<bool> _autoPair(String url) async {
+    try {
+      final r = await http.get(Uri.parse('$url/api/pair')).timeout(const Duration(seconds: 4));
+      if (r.statusCode != 200) return false;
+      final d = Device.fromQr(utf8.decode(r.bodyBytes));
+      if (d == null) return false;
+      final urls = [url, ...d.urls.where((u) => u != url)];
+      _fill(Device(id: d.id, name: _name.text.trim().isEmpty ? d.name : _name.text.trim(), urls: urls, token: d.token));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _save() async {
     final urls = _urls.text
         .split(RegExp(r'[\s,]+'))
@@ -103,6 +118,11 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
         .map((u) => u.startsWith('http') ? u : 'http://$u')
         .map((u) => u.endsWith('/') ? u.substring(0, u.length - 1) : u)
         .toList();
+    if (urls.isNotEmpty && _token.text.trim().isEmpty) {
+      for (final u in urls) {
+        if (await _autoPair(u)) break;
+      }
+    }
     if (urls.isEmpty || _token.text.trim().isEmpty) {
       setState(() => _msg = 'Вкажіть адресу і токен');
       return;
@@ -172,12 +192,20 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
               ListTile(
                 leading: const Icon(Icons.router),
                 title: Text(f['name'] as String),
-                subtitle: Text('${f['url']} · введіть токен нижче'),
-                onTap: () => setState(() {
-                  _id = f['id'] as String;
-                  _name.text = f['name'] as String;
-                  _urls.text = f['url'] as String;
-                }),
+                subtitle: Text(
+                  f['pairing'] == true
+                      ? '${f['url']} · натисніть, щоб додати'
+                      : '${f['url']} · вікно сполучення закрите: перезавантажте модуль або введіть токен',
+                ),
+                trailing: f['pairing'] == true ? const Icon(Icons.add_circle, color: Colors.greenAccent) : null,
+                onTap: () async {
+                  setState(() {
+                    _id = f['id'] as String;
+                    _name.text = f['name'] as String;
+                    _urls.text = f['url'] as String;
+                  });
+                  if (f['pairing'] == true && await _autoPair(f['url'] as String)) await _save();
+                },
               ),
             const Divider(height: 32),
             const Text('Вручну', style: TextStyle(fontWeight: FontWeight.bold)),

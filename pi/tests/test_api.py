@@ -37,3 +37,21 @@ def test_control_and_config(client):
     r = client.put("/api/config", json={"name": "Пост-1", "storage": {"quota_mb": 64}}, headers=h).json()
     assert r["name"] == "Пост-1" and r["storage"]["quota_mb"] == 64 and r["api"]["token"] == "***"
     assert len(client.get("/api/channels", headers=h).json()["bands"]) > 10
+
+
+def test_pairing_window(client):
+    p = client.get("/api/pair").json()
+    assert p["app"] == "sdrwatch" and p["t"] == "secret" and p["u"]
+    assert "<svg" in client.get("/").text
+
+
+def test_pairing_closed(tmp_path):
+    cfg = Config()
+    cfg._path = str(tmp_path / "c.json")
+    cfg.api.token = "secret"
+    cfg.api.pairing_window_s = 0
+    st = Storage(str(tmp_path / "st"), 50)
+    eng = Engine(cfg, SimulatedSource(), st, None, Hub())
+    c = TestClient(create_app(AppState(cfg, eng, st, Hub(), "sdr-test")))
+    assert c.get("/api/pair").status_code == 403
+    assert "закрите" in c.get("/").text

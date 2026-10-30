@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=sdrwatch
 Group=plugdev
+SupplementaryGroups=gpio
 Environment=SDRWATCH_CONFIG=/etc/sdrwatch/config.json
 ExecStart=/opt/sdrwatch/venv/bin/python -m sdrwatch run
 WorkingDirectory=/opt/sdrwatch

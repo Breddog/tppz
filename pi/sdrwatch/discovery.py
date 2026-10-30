@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import socket
@@ -30,12 +31,34 @@ def local_ips() -> list[str]:
     return sorted(ip for ip in ips if not ip.startswith("127."))
 
 
+def device_id_for(cfg) -> str:
+    """Стабільний id модуля (за серійним номером Raspberry Pi, інакше — за токеном)."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            serial = [ln.split(":")[1].strip() for ln in f if ln.startswith("Serial")]
+    except OSError:
+        serial = []
+    base = serial[0] if serial else cfg.api.token
+    return "sdr-" + hashlib.sha1(base.encode()).hexdigest()[:10]
+
+
+def pairing_payload(cfg, host: str | None = None) -> dict:
+    """Дані для додавання модуля в застосунок (вміст QR-коду)."""
+    ips = [host] if host else local_ips()
+    for ip in local_ips():
+        if ip not in ips:
+            ips.append(ip)
+    return {"app": "sdrwatch", "n": cfg.name, "id": device_id_for(cfg),
+            "u": [f"http://{ip}:{cfg.api.port}" for ip in ips], "t": cfg.api.token}
+
+
 class DiscoveryResponder(threading.Thread):
     """Відповідає на broadcast-запит застосунку: ім'я, id і порт API (без токена!)."""
 
-    def __init__(self, name_fn, device_id: str, api_port: int) -> None:
+    def __init__(self, name_fn, device_id: str, api_port: int, pairing_fn=None) -> None:
         super().__init__(daemon=True, name="discovery")
         self.name_fn, self.device_id, self.api_port = name_fn, device_id, api_port
+        self.pairing_fn = pairing_fn or (lambda: False)
 
     def run(self) -> None:
         try:
@@ -49,7 +72,8 @@ class DiscoveryResponder(threading.Thread):
             data, addr = sock.recvfrom(256)
             if data.strip() == MAGIC:
                 reply = json.dumps({"app": "sdrwatch", "name": self.name_fn(), "id": self.device_id,
-                                    "port": self.api_port}, ensure_ascii=False).encode()
+                                    "port": self.api_port, "pairing": self.pairing_fn()},
+                                   ensure_ascii=False).encode()
                 sock.sendto(reply, addr)
 
 
