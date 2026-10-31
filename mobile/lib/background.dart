@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'announcements.dart';
 import 'api.dart';
 import 'device_store.dart';
 import 'notifications.dart';
@@ -61,6 +62,7 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
   await Notifications.init();
+  await Announcements.start();
   var running = true;
   service.on('stop').listen((_) {
     running = false;

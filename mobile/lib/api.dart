@@ -23,10 +23,14 @@ class ApiClient {
 
   String get base => _base ?? _workingBase[device.id] ?? device.urls.first;
 
+  /// Модуль сам повідомив свою адресу (оголошення UDP) — пробувати її першою.
+  static void noteWorking(String deviceId, String url) => _workingBase[deviceId] = url;
+
   Map<String, String> get _headers => {'Authorization': 'Bearer ${device.token}', 'Content-Type': 'application/json'};
 
   /// Знайти адресу, на якій модуль відповідає.
   Future<String> resolve({Duration timeout = const Duration(seconds: 3)}) async {
+    _base = null;
     final candidates = [
       if (_workingBase[device.id] != null) _workingBase[device.id]!,
       ...device.urls.where((u) => u != _workingBase[device.id]),

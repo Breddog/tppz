@@ -16,6 +16,9 @@ RestartSec=3
 # Пріоритет для обробки сигналу
 Nice=-5
 LimitNOFILE=4096
+# /run/sdrwatch — позначка останнього підключення застосунку для sdrwatch-netwatch
+RuntimeDirectory=sdrwatch
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target

@@ -55,3 +55,33 @@ def test_pairing_closed(tmp_path):
     c = TestClient(create_app(AppState(cfg, eng, st, Hub(), "sdr-test")))
     assert c.get("/api/pair").status_code == 403
     assert "закрите" in c.get("/").text
+
+
+def test_announcer_payload(monkeypatch):
+    import json
+    import socket
+
+    from sdrwatch import discovery
+
+    sent = []
+
+    class FakeSock:
+        def setsockopt(self, *a):
+            pass
+
+        def sendto(self, data, addr):
+            sent.append((json.loads(data), addr))
+            if len(sent) >= 2:
+                raise SystemExit
+
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: FakeSock())
+    monkeypatch.setattr(discovery, "default_gateway", lambda: "192.168.43.1")
+    a = discovery.Announcer(lambda: "Пост-1", "sdr-x", 8080, lambda: True)
+    try:
+        a.run()
+    except SystemExit:
+        pass
+    dsts = {addr[0] for _, addr in sent}
+    assert dsts == {"255.255.255.255", "192.168.43.1"}      # broadcast + телефон-шлюз
+    assert all(addr[1] == discovery.ANNOUNCE_PORT for _, addr in sent)
+    assert sent[0][0] == {"app": "sdrwatch", "name": "Пост-1", "id": "sdr-x", "port": 8080, "pairing": True}

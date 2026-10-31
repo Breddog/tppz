@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'announcements.dart';
 import 'background.dart';
 import 'device_store.dart';
 import 'notifications.dart';
@@ -11,6 +12,7 @@ Future<void> main() async {
   await Notifications.init(requestPermission: true);
   final store = DeviceStore();
   await store.load();
+  await Announcements.start(store: store);
   try {
     await BackgroundMonitor.configure();
   } catch (_) {

@@ -11,7 +11,7 @@ import sys
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, Config
-from .discovery import DiscoveryResponder, device_id_for, pairing_payload, register_mdns
+from .discovery import Announcer, DiscoveryResponder, device_id_for, pairing_payload, register_mdns
 
 
 class AppState:
@@ -62,6 +62,7 @@ def cmd_run(args) -> None:
     dev_id = device_id_for(cfg)
     app = create_app(AppState(cfg, engine, storage, hub, dev_id))
     DiscoveryResponder(lambda: cfg.name, dev_id, cfg.api.port, app.state.pairing_open).start()
+    Announcer(lambda: cfg.name, dev_id, cfg.api.port, app.state.pairing_open).start()
     zc = register_mdns(cfg.name, cfg.api.port, dev_id)
 
     def shutdown(*_):

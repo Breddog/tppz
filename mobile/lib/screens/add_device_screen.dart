@@ -7,9 +7,11 @@ import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 
+import '../announcements.dart';
 import '../api.dart';
 import '../device_store.dart';
 import '../models.dart';
+import '../widgets/hotspot_help.dart';
 
 /// Додавання модуля: QR-код, пошук у локальній мережі або вручну.
 class AddDeviceScreen extends StatefulWidget {
@@ -64,13 +66,29 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     await _save();
   }
 
-  /// UDP-broadcast: модулі відповідають своїм ім'ям та портом (без токена).
+  StreamSubscription? _annSub;
+
+  @override
+  void dispose() {
+    _annSub?.cancel();
+    super.dispose();
+  }
+
+  void _addFound(Map<String, dynamic> j) {
+    if (!mounted) return;
+    final i = _found.indexWhere((f) => f['id'] == j['id']);
+    setState(() => i < 0 ? _found.add(j) : _found[i] = j);
+  }
+
+  /// UDP-broadcast у всі мережі телефону (Wi-Fi і власна точка доступу) + оголошення модулів.
   Future<void> _discover() async {
     setState(() {
       _searching = true;
       _found = [];
     });
+    _annSub ??= Announcements.stream.listen(_addFound);
     try {
+      final targets = await Announcements.broadcastTargets();
       final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       sock.broadcastEnabled = true;
       final sub = sock.listen((ev) {
@@ -81,11 +99,15 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
           final j = jsonDecode(utf8.decode(dg.data)) as Map<String, dynamic>;
           if (j['app'] != 'sdrwatch') return;
           j['url'] = 'http://${dg.address.address}:${j['port']}';
-          if (!_found.any((f) => f['id'] == j['id'])) setState(() => _found.add(j));
+          _addFound(j);
         } catch (_) {}
       });
-      for (var i = 0; i < 3; i++) {
-        sock.send(utf8.encode('SDRWATCH_DISCOVER'), InternetAddress('255.255.255.255'), 47800);
+      for (var i = 0; i < 4; i++) {
+        for (final t in targets) {
+          try {
+            sock.send(utf8.encode('SDRWATCH_DISCOVER'), t, 47800);
+          } catch (_) {}
+        }
         await Future.delayed(const Duration(milliseconds: 800));
       }
       await sub.cancel();
@@ -207,6 +229,8 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                   if (f['pairing'] == true && await _autoPair(f['url'] as String)) await _save();
                 },
               ),
+            const SizedBox(height: 8),
+            const HotspotHelp(),
             const Divider(height: 32),
             const Text('Вручну', style: TextStyle(fontWeight: FontWeight.bold)),
           ],

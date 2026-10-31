@@ -71,9 +71,12 @@ def create_app(app_state) -> FastAPI:
         if not token or not hmac.compare_digest(token, st.cfg.api.token):
             raise HTTPException(401, "Невірний токен")
 
+    last_seen = [0.0]
+
     def auth(request: Request, token: str | None = Query(None)) -> None:
         h = request.headers.get("authorization", "")
         check_token(h[7:] if h.lower().startswith("bearer ") else token)
+        _mark_client(last_seen)
 
     # ---- без авторизації: перевірка доступності ---------------------------------
     @app.get("/api/ping")
@@ -380,3 +383,20 @@ dt{{color:#93a6ad}}pre{{white-space:pre-wrap;word-break:break-all;color:#111}}</
 <h1>{name}</h1><dl><dt>Версія</dt><dd>{version}</dd><dt>Приймач</dt><dd>{sdr}</dd><dt>Режим</dt><dd>{mode}</dd>
 <dt>Активних сигналів</dt><dd>{active}</dd><dt>Температура CPU</dt><dd>{temp} °C</dd></dl>
 <h2>Підключення телефону</h2>{pairing}</main></body></html>"""
+
+
+CLIENT_STAMP = os.path.join(os.environ.get("RUNTIME_DIRECTORY", "/run/sdrwatch"), "last_client")
+
+
+def _mark_client(last: list) -> None:
+    """Позначка «застосунок був на зв'язку» для сторожа мережі (sdrwatch-netwatch):
+    якщо телефон довго не підключається, модуль перейде на точку доступу sdrdetect."""
+    now = time.time()
+    if now - last[0] < 10:
+        return
+    last[0] = now
+    try:
+        with open(CLIENT_STAMP, "w") as f:
+            f.write(str(int(now)))
+    except OSError:
+        pass

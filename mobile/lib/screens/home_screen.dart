@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../api.dart';
 import '../device_store.dart';
 import '../models.dart';
+import '../widgets/hotspot_help.dart';
 import '../widgets/signal_widgets.dart';
 import 'add_device_screen.dart';
 import 'app_settings_screen.dart';
@@ -61,25 +62,22 @@ class _Empty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
-      child: Padding(
-        padding: EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.settings_input_antenna, size: 72, color: Colors.white24),
-            SizedBox(height: 16),
-            Text('Модулі ще не додано', style: TextStyle(fontSize: 18)),
-            SizedBox(height: 8),
-            Text(
-              'Підключіть Raspberry Pi з SDR-приймачем до мережі, виконайте на ньому\n'
-              'sdrwatch pair і відскануйте QR-код кнопкою «Додати модуль».',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white54),
-            ),
-          ],
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 40, 20, 100),
+      children: const [
+        Icon(Icons.settings_input_antenna, size: 72, color: Colors.white24),
+        SizedBox(height: 16),
+        Text('Модулі ще не додано', textAlign: TextAlign.center, style: TextStyle(fontSize: 18)),
+        SizedBox(height: 8),
+        Text(
+          'Увімкніть Raspberry Pi з SDR-приймачем і протягом 15 хвилин натисніть «Додати модуль» → '
+          '«Знайти в локальній мережі».',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white54),
         ),
-      ),
+        SizedBox(height: 20),
+        HotspotHelp(compact: true),
+      ],
     );
   }
 }

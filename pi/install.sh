@@ -24,6 +24,7 @@ rm -rf /opt/sdrwatch/sdrwatch
 cp -r "$SRC/sdrwatch" /opt/sdrwatch/
 cp "$SRC/requirements.txt" /opt/sdrwatch/
 install -m 755 "$SRC/image/sdrwatch-firstboot.sh" /usr/local/sbin/sdrwatch-firstboot
+install -m 755 "$SRC/image/sdrwatch-netwatch.sh" /usr/local/sbin/sdrwatch-netwatch
 chown -R sdrwatch:plugdev /var/lib/sdrwatch /etc/sdrwatch
 
 echo "==> Python-оточення (з доступом до системного SoapySDR і numpy)"
@@ -46,18 +47,50 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="2cf0", ATTR{idProduct}=="5250", MODE="0660", 
 R
 echo "blacklist dvb_usb_rtl28xxu" > /etc/modprobe.d/blacklist-rtlsdr.conf
 
+echo "==> Резервна мережа: точка доступу телефону sdrdetect / 12345678"
+# Профіль пишемо файлом (працює й у chroot збірки образу, де NetworkManager не запущено).
+# Пріоритет нижчий за звичайний Wi-Fi: вдома модуль іде у вашу мережу, у полі — на телефон.
+mkdir -p /etc/NetworkManager/system-connections
+if [ ! -f /etc/NetworkManager/system-connections/sdrdetect.nmconnection ]; then
+  cat > /etc/NetworkManager/system-connections/sdrdetect.nmconnection <<'N'
+[connection]
+id=sdrdetect
+type=wifi
+autoconnect=true
+autoconnect-priority=-10
+autoconnect-retries=0
+
+[wifi]
+mode=infrastructure
+ssid=sdrdetect
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=12345678
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+N
+  chmod 600 /etc/NetworkManager/system-connections/sdrdetect.nmconnection
+fi
+[ "$IMAGE" = 0 ] && nmcli connection reload 2>/dev/null || true
+
 echo "==> Вимкнути власний Wi-Fi/Bluetooth? (вони світять у 2.4/5 ГГц — див. docs/HARDWARE.md)"
 echo "    За замовчуванням лишаються ввімкненими, бо через Wi-Fi модуль може бути на зв'язку."
 
 echo "==> Сервіси"
 install -m 644 "$SRC/systemd/sdrwatch.service" /etc/systemd/system/sdrwatch.service
 install -m 644 "$SRC/image/sdrwatch-firstboot.service" /etc/systemd/system/sdrwatch-firstboot.service
-systemctl enable sdrwatch.service sdrwatch-firstboot.service
+install -m 644 "$SRC/image/sdrwatch-netwatch.service" /etc/systemd/system/sdrwatch-netwatch.service
+systemctl enable sdrwatch.service sdrwatch-firstboot.service sdrwatch-netwatch.service
 
 if [ "$IMAGE" = 0 ]; then
   udevadm control --reload-rules && udevadm trigger || true
   systemctl daemon-reload
-  systemctl restart sdrwatch
+  systemctl restart sdrwatch sdrwatch-netwatch
   sleep 4
   sdrwatch pair || true
   IP=$(hostname -I | awk '{print $1}')

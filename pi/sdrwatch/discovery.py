@@ -11,6 +11,7 @@ import threading
 log = logging.getLogger(__name__)
 
 DISCOVERY_PORT = 47800
+ANNOUNCE_PORT = 47801
 MAGIC = b"SDRWATCH_DISCOVER"
 
 
@@ -75,6 +76,47 @@ class DiscoveryResponder(threading.Thread):
                                     "port": self.api_port, "pairing": self.pairing_fn()},
                                    ensure_ascii=False).encode()
                 sock.sendto(reply, addr)
+
+
+def default_gateway() -> str | None:
+    """IP шлюзу за замовчуванням; на точці доступу телефону це сам телефон."""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                p = line.split()
+                if p[1] == "00000000" and int(p[3], 16) & 2:
+                    return socket.inet_ntoa(bytes.fromhex(p[2])[::-1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+class Announcer(threading.Thread):
+    """Кожні кілька секунд повідомляє застосунку «я тут» (broadcast + напряму шлюзу).
+
+    Коли модуль підключився до точки доступу телефону, шлюз — це телефон, тож застосунок
+    дізнається нову IP-адресу модуля без жодного пошуку."""
+
+    def __init__(self, name_fn, device_id: str, api_port: int, pairing_fn=None, period_s: float = 3.0) -> None:
+        super().__init__(daemon=True, name="announcer")
+        self.name_fn, self.device_id, self.api_port = name_fn, device_id, api_port
+        self.pairing_fn = pairing_fn or (lambda: False)
+        self.period = period_s
+
+    def run(self) -> None:
+        import time
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        while True:
+            msg = json.dumps({"app": "sdrwatch", "name": self.name_fn(), "id": self.device_id,
+                              "port": self.api_port, "pairing": self.pairing_fn()},
+                             ensure_ascii=False).encode()
+            for dst in {"255.255.255.255", default_gateway()} - {None}:
+                try:
+                    sock.sendto(msg, (dst, ANNOUNCE_PORT))
+                except OSError:
+                    pass
+            time.sleep(self.period)
 
 
 def register_mdns(name: str, port: int, device_id: str):
