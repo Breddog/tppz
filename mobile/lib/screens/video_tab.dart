@@ -8,6 +8,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api.dart';
 import '../live.dart';
 import '../models.dart';
+import 'audio_panel.dart';
 
 /// Вкладка «Відео»: ЗАВЖДИ живий екран у реальному часі.
 /// Є сигнал — показує відео, немає — реальний «сніг» (ніколи не чорний/синій екран).
@@ -32,6 +33,8 @@ class _VideoTabState extends State<VideoTab> {
   final _mhzCtl = TextEditingController();
   double _freqMhz = 5800;
   bool _started = false;
+  String _section = 'video'; // 'video' | 'audio'
+  final Set<String> _scanBands = {'R', 'F', 'A', 'B', 'E'};
   Timer? _tuneDebounce;
   DateTime _lastTune = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -119,6 +122,33 @@ class _VideoTabState extends State<VideoTab> {
     final minMhz = ((sdr['min_freq_hz'] as num?)?.toDouble() ?? 1e6) / 1e6;
     final maxMhz = ((sdr['max_freq_hz'] as num?)?.toDouble() ?? 6e9) / 1e6;
 
+    final sectionSwitch = Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+      child: SegmentedButton<String>(
+        segments: const [
+          ButtonSegment(value: 'video', icon: Icon(Icons.videocam), label: Text('Відео')),
+          ButtonSegment(value: 'audio', icon: Icon(Icons.headphones), label: Text('Звук')),
+        ],
+        selected: {_section},
+        onSelectionChanged: (sel) => setState(() {
+          _section = sel.first;
+          if (_section == 'audio') {
+            _close();
+          } else {
+            _started = false; // повернулися до відео — знову увімкнути стеження
+          }
+        }),
+      ),
+    );
+    if (_section == 'audio') {
+      return Column(
+        children: [
+          sectionSwitch,
+          Expanded(child: AudioPanel(api: widget.api)),
+        ],
+      );
+    }
+
     // Завжди тримаємо режим стеження, щоб екран був живий
     if (widget.active) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -143,9 +173,11 @@ class _VideoTabState extends State<VideoTab> {
     final rec = w?['recording'] == true;
     final opts = (l.status['video_opts'] as Map?)?.cast<String, dynamic>() ?? {};
 
+    final auto = w?['autoscan'] as Map<String, dynamic>?;
     return ListView(
       padding: const EdgeInsets.only(bottom: 20),
       children: [
+        sectionSwitch,
         // ---- екран ----
         AspectRatio(
           aspectRatio: 4 / 3,
@@ -266,6 +298,77 @@ class _VideoTabState extends State<VideoTab> {
 
         // ---- швидкий перехід на знайдене відео ----
         _VideoSignals(onTune: (hz) => _tune(hz / 1e6, immediate: true)),
+
+        // ---- автоскан відео ----
+        Card(
+          margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.autorenew, size: 18),
+                    const SizedBox(width: 6),
+                    const Expanded(
+                      child: Text('Автоскан відео', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                    if (auto != null)
+                      Text(
+                        'канал ${(auto['index'] as int) + 1}/${auto['total']}',
+                        style: const TextStyle(color: Colors.white60, fontSize: 12),
+                      ),
+                  ],
+                ),
+                const Text(
+                  'Перебирає канали сітки й зупиняється, коли є картинка; зникла — шукає далі.',
+                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final b in const ['R', 'F', 'A', 'B', 'E', 'L', '1G2', '3G3'])
+                      FilterChip(
+                        label: Text(b),
+                        selected: _scanBands.contains(b),
+                        onSelected: (v) => setState(() => v ? _scanBands.add(b) : _scanBands.remove(b)),
+                      ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    FilledButton.icon(
+                      icon: Icon(auto != null ? Icons.stop : Icons.play_arrow),
+                      label: Text(auto != null ? 'Зупинити' : 'Почати автоскан'),
+                      onPressed: () => _do(
+                        () => widget.api.post('/api/control/video_autoscan', {
+                          'on': auto == null,
+                          'bands': _scanBands.toList(),
+                        }),
+                      ),
+                    ),
+                  ],
+                ),
+                if (auto != null && (auto['found'] as List).isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  const Text('Знайдено відео:', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      for (final f in (auto['found'] as List).cast<Map<String, dynamic>>())
+                        ActionChip(
+                          avatar: const Icon(Icons.videocam, size: 16, color: Colors.redAccent),
+                          label: Text('${f['channel']} · ${f['freq_mhz']}'),
+                          onPressed: () => _tune((f['freq_mhz'] as num).toDouble(), immediate: true),
+                        ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
 
         // ---- керування ----
         Padding(

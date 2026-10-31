@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 SPECTRUM_POINTS = 1024
 FULL_SPECTRUM_POINTS = 2048
 FULL_BAND_INDEX = 100       # індекс панорами «Повний діапазон» (поза списком cfg.ranges)
-MAX_ANALYSES_PER_SWEEP = 2
+MAX_ANALYSES_PER_SWEEP = 1   # аналіз IQ найдорожчий — не більше одного за прохід діапазону
 
 
 @dataclass
@@ -102,6 +102,8 @@ class Engine:
         self.tx: dict | None = None            # активна передача: параметри + буфер
         self._tx_active = False
         self._opened = False                   # чи відкрито приймач (HackRF може бути відсутній)
+        self.audio: dict | None = None         # режим звуку: частота, модуляція, шумодав, автоскан
+        self._audio_active = False
         self._next_open = 0.0
         self.stats = {"sweep_s": 0.0, "sweeps": 0, "started": time.time(), "errors": 0, "last_error": ""}
         self._stop = threading.Event()
@@ -163,6 +165,7 @@ class Engine:
         if self._thread:
             self._thread.join(timeout=5)
         self._tx_end()
+        self._audio_end()
         self._close_clip()
         self.src.close()
 
@@ -183,8 +186,149 @@ class Engine:
                 self.recording = False
             if mode != "transmit":
                 self.tx = None       # перехід у будь-який інший режим зупиняє передачу
+            if mode != "audio":
+                self.audio = None
             self.mode = mode
         self._reconf.set()
+
+    # ---- звук з ефіру -----------------------------------------------------------------------
+    def start_audio(self, freq_hz: float | None, mod: str = "nfm", squelch_db: float = 10.0,
+                    scan: dict | None = None) -> dict:
+        """Слухати частоту (або автоскан діапазону зі зупинкою на сигналі)."""
+        from .dsp import audio as au
+        if mod not in au.MODES:
+            raise ValueError("Невідома модуляція")
+        if scan:
+            start, stop = float(scan["start_hz"]), float(scan["stop_hz"])
+            step = float(scan.get("step_hz") or 12.5e3)
+            if stop <= start or step <= 0:
+                raise ValueError("Невірний діапазон автоскану")
+            scan = {"start_hz": start, "stop_hz": stop, "step_hz": step, "hold_s": float(scan.get("hold_s", 2.0))}
+            freq_hz = freq_hz or start
+        if freq_hz is None:
+            raise ValueError("Потрібна частота")
+        with self._lock:
+            self._close_clip()
+            self.tx = None
+            self.audio = {"freq_hz": float(freq_hz), "mod": mod, "squelch_db": float(squelch_db),
+                          "scan": scan, "center": float(freq_hz) + au.TUNE_OFFSET,
+                          "demod": au.AudioDemod(mod), "open": False, "level_db": None,
+                          "locked": scan is None, "last_open": 0.0, "tuned": None}
+            self.mode = "audio"
+        self._reconf.set()
+        return self.audio_status()
+
+    def set_audio_params(self, squelch_db: float | None = None, mod: str | None = None) -> dict:
+        a = self.audio
+        if a:
+            if squelch_db is not None:
+                a["squelch_db"] = float(squelch_db)
+            if mod and mod != a["mod"]:
+                a["mod"] = mod
+                a["demod"].set_mode(mod)
+        return self.audio_status()
+
+    def stop_audio(self) -> dict:
+        with self._lock:
+            self.audio = None
+            if self.mode == "audio":
+                self.mode = "scan"
+        self._reconf.set()
+        return self.audio_status()
+
+    def audio_status(self) -> dict:
+        a = self.audio
+        if not a or self.mode != "audio":
+            return {"active": False}
+        return {"active": True, "freq_hz": round(a["freq_hz"]), "mod": a["mod"], "squelch_db": a["squelch_db"],
+                "open": a["open"], "level_db": a["level_db"], "scanning": bool(a["scan"]) and not a["locked"],
+                "scan": a["scan"]}
+
+    def _audio_step(self) -> None:
+        from .dsp import audio as au
+        a = self.audio
+        if not a:
+            self.mode = "scan"
+            return
+        if not self._audio_active:
+            self.src.set_sample_rate(au.SDR_RATE)
+            self._audio_active = True
+            a["tuned"] = None
+        now = time.time()
+        sc = a["scan"]
+        if sc and not a["locked"]:
+            # Автоскан: одне вікно ±1 МГц за запис, шукаємо канали сітки вище шумодава
+            if a["tuned"] != a["center"]:
+                self._tune(a["center"])
+                a["tuned"] = a["center"]
+            iq = self._read(int(au.SDR_RATE * 0.015))
+            peaks = au.window_peaks(iq, a["center"], sc["step_hz"], sc["start_hz"], sc["stop_hz"],
+                                    a["squelch_db"])
+            if peaks:
+                a["freq_hz"], a["level_db"] = peaks[0][0], round(peaks[0][1], 1)
+                a["locked"], a["last_open"] = True, now
+                a["demod"] = au.AudioDemod(a["mod"])
+            else:
+                nxt = a["center"] + 2.0e6
+                if nxt - 1.0e6 > sc["stop_hz"]:
+                    nxt = sc["start_hz"] + 1.0e6
+                a["center"] = nxt
+                a["freq_hz"] = max(sc["start_hz"], nxt - 1.0e6)
+            self.hub.publish("live", {"type": "audio", **self.audio_status(), "ts": now})
+            return
+        # Слухаємо: блок 100 мс → звук
+        if a["tuned"] != a["center"] or abs(a["freq_hz"] - a["center"]) > 1.05e6:
+            if abs(a["freq_hz"] - a["center"]) > 1.05e6:
+                a["center"] = a["freq_hz"] + au.TUNE_OFFSET
+            self._tune(a["center"])
+            a["tuned"] = a["center"]
+        iq = self._read(int(au.SDR_RATE * 0.1))
+        pcm, _ = a["demod"].process(iq, a["freq_hz"] - a["center"])
+        lvl = au.window_peaks(iq[:32768], a["center"], 1.0, a["freq_hz"], a["freq_hz"], -999.0)
+        a["level_db"] = round(lvl[0][1], 1) if lvl else None
+        a["open"] = a["level_db"] is not None and a["level_db"] >= a["squelch_db"]
+        if a["open"]:
+            a["last_open"] = now
+            self.hub.publish("audio", pcm.tobytes())
+        elif sc and now - a["last_open"] > sc["hold_s"]:
+            a["locked"] = False            # сигнал зник — продовжуємо автоскан з наступного вікна
+            a["center"] += 2.0e6
+        # Живий спектр навколо частоти (2.4 МГц)
+        d = self.cfg.dsp
+        spec = spectrum.remove_dc(spectrum.psd_db(iq[: d.fft_size * (d.averages + 1)], d.fft_size, d.averages))
+        spec = spec + self.gain_offset_db
+        freqs = a["center"] + (np.arange(len(spec)) - len(spec) / 2 + 0.5) * au.SDR_RATE / len(spec)
+        self.hub.publish("live", self._spectrum_msg(-2, "Звук", freqs[0], freqs[-1], spec, spectrum.local_floor(spec)))
+        self.hub.publish("live", {"type": "audio", **self.audio_status(), "ts": now})
+
+    def _audio_end(self) -> None:
+        if self._audio_active:
+            self._audio_active = False
+            self.src.set_sample_rate(self.cfg.sdr.sample_rate)
+
+    def set_video_autoscan(self, on: bool, bands: list[str] | None = None) -> dict:
+        """Автоскан відео: перебирати аналогові канали, зупинятися на картинці."""
+        if not on:
+            if self.watch_status:
+                self.watch_status.pop("autoscan", None)
+            return {"autoscan": False}
+        codes = bands or ["R", "F", "A", "B", "E"]
+        freqs: list[float] = []
+        for code in codes:
+            b = ch.BAND_BY_CODE.get(code)
+            if not b:
+                continue
+            for c in b.channels():
+                if all(abs(c.freq_hz - f) > 2e6 for f in freqs):
+                    freqs.append(c.freq_hz)
+        freqs.sort()
+        if not freqs:
+            raise ValueError("Немає каналів для автоскану")
+        if self.mode != "watch":
+            self.set_mode("watch", freqs[0])
+        self.watch_status["autoscan"] = {"freqs": freqs, "idx": 0, "found": {}, "last_video": 0.0}
+        self.watch_freq = freqs[0]
+        return {"autoscan": True, "channels": len(freqs)}
 
     def start_transmit(self, mode: str, freq_hz: float, gain_db: float | None = None,
                        standard: str | None = None, image: np.ndarray | None = None,
@@ -372,6 +516,11 @@ class Engine:
                 if self._need_plan:
                     self._build_plan()
                 # Вийшли з режиму передачі — повернути приймання
+                if self._audio_active and self.mode != "audio":
+                    self._audio_end()
+                if self.mode == "audio":
+                    self._audio_step()
+                    continue
                 if self._tx_active and self.mode != "transmit":
                     self._tx_end()
                 if self.mode == "transmit":
@@ -448,9 +597,15 @@ class Engine:
 
     def _scan_cycle(self) -> None:
         t0 = time.time()
+        # Фокус перегляду: діапазон, відкритий у застосунку, скануємо кожен цикл, решту — кожен 4-й.
+        # Так спектр/водоспад на екрані оновлюються в рази частіше, а виявлення по інших триває.
+        focus = self.hub.viewed_ranges()
+        self._cycle_n = getattr(self, "_cycle_n", 0) + 1
         for pano in list(self.panoramas):
             if self._interrupted():
                 return
+            if focus and pano.index not in focus and self._cycle_n % 4:
+                continue
             self._run_hunts()
             self._sweep(pano)
         self.stats["sweep_s"] = round(time.time() - t0, 3)
@@ -730,6 +885,17 @@ class Engine:
                 self.clip = ClipWriter(self.storage, f, "Запис стеження", max_s=self.cfg.storage.video_clip_s)
             self.clip.add(data, mime)
 
+        auto = st.get("autoscan")
+        if auto:
+            if res.is_video:
+                auto["last_video"] = now
+                m0 = ch.match_channel(f, kind="analog")
+                key = m0.channel.name if m0 else f"{f / 1e6:.0f}"     # групуємо за каналом (AFC трохи «гуляє»)
+                auto["found"][key] = round(f / 1e6, 1)
+            elif now - auto["last_video"] > 1.5:
+                # Немає картинки — наступний канал (з картинкою стоїмо, поки вона є)
+                auto["idx"] = (auto["idx"] + 1) % len(auto["freqs"])
+                self.watch_freq = auto["freqs"][auto["idx"]]
         if res.is_video:
             st["lost_since"] = None
             st["hunt"] = None
@@ -756,6 +922,9 @@ class Engine:
             "type": "watch", "freq_hz": round(self.watch_freq), "video": res.to_dict(),
             "channel": m.to_dict() if m else None, "recording": self.recording,
             "manual": manual, "searching": bool(st.get("hunt")), "ts": now,
+            "autoscan": ({"index": auto["idx"], "total": len(auto["freqs"]),
+                          "found": [{"channel": k, "freq_mhz": v} for k, v in auto["found"].items()]}
+                         if auto else None),
         })
 
     def _close_clip(self) -> None:
@@ -819,6 +988,11 @@ class Engine:
             "recording": self.recording,
             "tx": self.tx_status(),
             "echo_filter": self.echo_status(),
+            "audio": self.audio_status(),
+            "dsp": {"fft_size": self.cfg.dsp.fft_size, "averages": self.cfg.dsp.averages,
+                    "threshold_db": self.cfg.dsp.threshold_db, "confirm_hits": self.cfg.dsp.confirm_hits,
+                    "rbw_hz": round(self.src.sample_rate / max(1, self.cfg.dsp.fft_size)) if self.src.sample_rate else None},
+            "focus": sorted(r for r in self.hub.viewed_ranges() if isinstance(r, int)),
             "gain": {"lna": self.gain[0], "vga": self.gain[1], "amp": self.gain[2],
                      "auto": self.cfg.sdr.auto_gain},
             "video_opts": self.video_opts,

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../api.dart';
@@ -36,6 +37,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
       if (!mounted || e['kind'] != 'new') return;
       final s = Signal(e['track'] as Map<String, dynamic>);
       if ((s.cls?.priority ?? 0) < 2) return;
+      SystemSound.play(SystemSoundType.alert); // звуковий сигнал про нову знахідку
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: classColor(s.cls?.code).withValues(alpha: 0.95),
@@ -245,6 +247,7 @@ class _LiveTabState extends State<LiveTab> {
             ],
           ),
         ),
+        ScanParams(status: l.status, frame: frame),
         Expanded(
           flex: 6,
           child: frame == null
@@ -396,6 +399,87 @@ class _SignalsTabState extends State<SignalsTab> {
                 ),
         ),
       ],
+    );
+  }
+}
+
+/// Параметри сканування одним рядком (розгортається по натиску).
+class ScanParams extends StatefulWidget {
+  const ScanParams({super.key, required this.status, required this.frame});
+
+  final Map<String, dynamic> status;
+  final SpectrumFrame? frame;
+
+  @override
+  State<ScanParams> createState() => _ScanParamsState();
+}
+
+class _ScanParamsState extends State<ScanParams> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final st = widget.status;
+    final stats = (st['stats'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final dsp = (st['dsp'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final gain = (st['gain'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final echo = (st['echo_filter'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final ranges = ((st['ranges'] as List?) ?? const []).cast<Map<String, dynamic>>();
+    final f = widget.frame;
+    final cur = f == null ? null : ranges.where((r) => r['index'] == f.range).firstOrNull;
+    final full = ranges.where((r) => r['full'] == true).firstOrNull;
+    final fs = (st['sample_rate'] as num?)?.toDouble();
+    final mode = switch (st['mode']) {
+      'scan' => 'сканування',
+      'watch' => 'стеження',
+      'audio' => 'звук',
+      'transmit' => 'ПЕРЕДАЧА',
+      'paused' => 'пауза',
+      _ => '${st['mode'] ?? '—'}',
+    };
+    final line =
+        '$mode · прохід ${stats['sweep_s'] ?? '—'} с'
+        '${fs != null ? ' · смуга ${(fs / 1e6).toStringAsFixed(1)} МГц' : ''}'
+        '${dsp['rbw_hz'] != null ? ' · RBW ${((dsp['rbw_hz'] as num) / 1e3).toStringAsFixed(1)} кГц' : ''}'
+        ' · поріг ${dsp['threshold_db'] ?? '—'} дБ';
+    final style = const TextStyle(fontSize: 11.5, color: Colors.white60);
+    return InkWell(
+      onTap: () => setState(() => _open = !_open),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(_open ? Icons.expand_less : Icons.tune, size: 14, color: Colors.white38),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(line, style: style, overflow: TextOverflow.ellipsis),
+                ),
+              ],
+            ),
+            if (_open)
+              Padding(
+                padding: const EdgeInsets.only(left: 18, top: 2, bottom: 4),
+                child: Text(
+                  [
+                    if (f != null) 'Діапазон: ${fmtFreq(f.fStart)} – ${fmtFreq(f.fStop)}',
+                    if (cur != null) 'Сегментів: ${cur['segments']} · проходів: ${cur['sweeps']}',
+                    'FFT: ${dsp['fft_size'] ?? '—'} точок × ${dsp['averages'] ?? '—'} усереднень',
+                    'Підтвердження: ${dsp['confirm_hits'] ?? '—'} проходи',
+                    'Підсилення: LNA ${gain['lna']} · VGA ${gain['vga']} · AMP ${gain['amp'] == true ? 'так' : 'ні'}'
+                        '${gain['auto'] == true ? ' (авто)' : ''}',
+                    if (full != null) 'Повний діапазон: прохід ${full['pass_s'] ?? '…'} с',
+                    'Ехо-фільтр: ${echo['enabled'] == true ? (echo['learning'] == true ? 'вивчає фон' : 'увімкнено') : 'вимкнено'}',
+                    'Помилок SDR: ${stats['errors'] ?? 0}',
+                  ].join('\n'),
+                  style: style,
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

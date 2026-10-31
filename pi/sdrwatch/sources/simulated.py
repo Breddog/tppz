@@ -130,6 +130,12 @@ class Emitter:
             chirp_t = np.mod(t, 1e-3) / 1e-3
             inst = np.where(on, f + (chirp_t - 0.5) * self.bandwidth_hz, 0.0)
             base, off = np.exp(1j * 2 * np.pi * np.cumsum(inst) / fs) * on, 0.0
+        elif self.kind == "nfm":
+            # Рація: ЧМ з тоном 1 кГц, девіація 3 кГц
+            ph = (3000 / 1000) * np.sin(2 * np.pi * 1000 * t)   # індекс β = девіація / тон
+            base, off = np.exp(1j * ph), self.freq_hz - center_hz
+        elif self.kind == "am":
+            base, off = (1 + 0.6 * np.sin(2 * np.pi * 1000 * t)).astype(np.complex128), self.freq_hz - center_hz
         elif self.kind == "cw":
             base, off = np.ones(n, np.complex128), self.freq_hz - center_hz
         else:

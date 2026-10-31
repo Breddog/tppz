@@ -39,6 +39,12 @@ class Hub:
             if s in self._subs:
                 self._subs.remove(s)
 
+    def viewed_ranges(self) -> set:
+        """Діапазони, які зараз дивляться в застосунку (вибрані на вкладці «Ефір»)."""
+        with self._lock:
+            return {s.options.get("range") for s in self._subs
+                    if s.channel == "live" and s.options.get("range") is not None}
+
     def count(self, channel: str) -> int:
         with self._lock:
             return sum(1 for s in self._subs if s.channel == channel)

@@ -50,6 +50,25 @@ class EchoReq(BaseModel):
     relearn: bool = False
 
 
+class AudioReq(BaseModel):
+    freq_hz: float | None = None
+    mod: str = "nfm"                 # nfm | wfm | am
+    squelch_db: float = 10.0
+    scan_start_hz: float | None = None   # автоскан: діапазон і крок сітки
+    scan_stop_hz: float | None = None
+    scan_step_hz: float = 12.5e3
+
+
+class AudioParams(BaseModel):
+    squelch_db: float | None = None
+    mod: str | None = None
+
+
+class VideoAutoscanReq(BaseModel):
+    on: bool
+    bands: list[str] | None = None
+
+
 class WifiReq(BaseModel):
     ssid: str
     password: str = ""
@@ -190,7 +209,7 @@ def create_app(app_state) -> FastAPI:
             net = network.info(st.cfg.name)
         except Exception as e:  # noqa: BLE001
             net = {"hostname": st.cfg.name, "interfaces": [], "wifi": {}, "saved_wifi": [], "error": str(e)}
-        return _render_home(st.cfg, s, pairing_html, net, token_for_js)
+        return _render_home(st.cfg, s, pairing_html, net, token_for_js, updater.installed_build())
 
     # ---- стан і сигнали -----------------------------------------------------------------
     @app.get("/api/status", dependencies=[Depends(auth)])
@@ -356,6 +375,36 @@ def create_app(app_state) -> FastAPI:
         res = st.engine.set_echo_filter(req.on, req.relearn)
         st.cfg.save()
         return res
+
+    # ---- звук з ефіру ----------------------------------------------------------------------------
+    @app.get("/api/audio", dependencies=[Depends(auth)])
+    def audio_status():
+        return st.engine.audio_status()
+
+    @app.post("/api/audio/start", dependencies=[Depends(require_control)])
+    def audio_start(req: AudioReq):
+        scan = None
+        if req.scan_start_hz and req.scan_stop_hz:
+            scan = {"start_hz": req.scan_start_hz, "stop_hz": req.scan_stop_hz, "step_hz": req.scan_step_hz}
+        try:
+            return st.engine.start_audio(req.freq_hz, req.mod, req.squelch_db, scan)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/audio/params", dependencies=[Depends(require_control)])
+    def audio_params(req: AudioParams):
+        return st.engine.set_audio_params(req.squelch_db, req.mod)
+
+    @app.post("/api/audio/stop", dependencies=[Depends(require_control)])
+    def audio_stop():
+        return st.engine.stop_audio()
+
+    @app.post("/api/control/video_autoscan", dependencies=[Depends(require_control)])
+    def video_autoscan(req: VideoAutoscanReq):
+        try:
+            return st.engine.set_video_autoscan(req.on, req.bands)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     # ---- тестовий передавач ----------------------------------------------------------------------
     _tx_image: dict = {"data": None}
@@ -525,6 +574,29 @@ def create_app(app_state) -> FastAPI:
         finally:
             st.hub.unsubscribe(sub)
 
+    @app.websocket("/ws/audio")
+    async def ws_audio(ws: WebSocket, token: str | None = None):
+        """Звук: бінарні блоки PCM 16-біт LE моно 24 кГц (лише коли відкритий шумодав)."""
+        try:
+            check_token(token)
+        except HTTPException:
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        sub = st.hub.subscribe("audio", maxsize=8)
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(sub.q.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    await ws.send_json({"type": "ping"})
+                    continue
+                await ws.send_bytes(chunk)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            st.hub.unsubscribe(sub)
+
     @app.exception_handler(TimeoutError)
     async def _timeout(_, exc):
         return JSONResponse({"detail": "Приймач зайнятий, спробуйте ще раз"}, status_code=503)
@@ -575,7 +647,7 @@ button{background:#0e7c86;border:0;cursor:pointer;color:#fff;font-weight:600}but
 .net{background:#121a22;border:1px solid #1c2730;border-radius:8px;padding:6px 12px;margin:6px 0}</style></head><body><main>"""
 
 
-def _render_home(cfg, status: dict, pairing_html: str, net: dict, token_js: str) -> str:
+def _render_home(cfg, status: dict, pairing_html: str, net: dict, token_js: str, build: str | None = None) -> str:
     import json as _json
     name = _esc(cfg.name)
     rows = [f"<tr><td>{_esc(i['device'])}</td><td>{_esc(i['type'])}</td>"
@@ -592,7 +664,7 @@ def _render_home(cfg, status: dict, pairing_html: str, net: dict, token_js: str)
         for w in net.get("saved_wifi", []))
     body = f"""{_HEAD.replace("__TITLE__", name)}
 <h1>{name}</h1>
-<dl><dt>Версія</dt><dd>{__version__}</dd><dt>Приймач</dt><dd>{_esc(status['sdr']['name'])}
+<dl><dt>Версія</dt><dd>{__version__}{(' · збірка ' + _esc(build)) if build else ''}</dd><dt>Приймач</dt><dd>{_esc(status['sdr']['name'])}
 {'(не підключено)' if not status.get('sdr_connected', True) else ''}</dd>
 <dt>Режим</dt><dd>{_esc(status['mode'])}</dd><dt>Активних сигналів</dt><dd>{status['active_signals']}</dd>
 <dt>Температура CPU</dt><dd>{status['cpu_temp_c'] or '—'} °C</dd>

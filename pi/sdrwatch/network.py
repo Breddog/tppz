@@ -66,7 +66,7 @@ def _interfaces_fallback() -> list[dict]:
 
 
 def wifi_status() -> dict:
-    rc, data, _ = _nmcli("-f", "ACTIVE,SSID,SIGNAL,FREQ", "device", "wifi")
+    rc, data, _ = _nmcli("-f", "ACTIVE,SSID,SIGNAL,FREQ", "device", "wifi", "list", "--rescan", "no")
     current = None
     if rc == 0:
         for line in data.strip().splitlines():

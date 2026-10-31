@@ -27,6 +27,7 @@ class LiveConnection extends ChangeNotifier {
   final Map<int, Float32List> peakHold = {};
   int? selectedRange;
   Map<String, dynamic>? watch;
+  Map<String, dynamic>? audio; // стан режиму звуку (частота, рівень, шумодав)
   final _events = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get events => _events.stream;
 
@@ -81,6 +82,7 @@ class LiveConnection extends ChangeNotifier {
     switch (m['type']) {
       case 'hello':
         status = m['status'] as Map<String, dynamic>;
+        audio = (status['audio'] as Map?)?.cast<String, dynamic>();
         signals = (m['signals'] as List).map((e) => Signal(e as Map<String, dynamic>)).toList();
         break;
       case 'spectrum':
@@ -106,6 +108,9 @@ class LiveConnection extends ChangeNotifier {
         break;
       case 'watch':
         watch = m;
+        break;
+      case 'audio':
+        audio = m;
         break;
       case 'event':
         _events.add(m);

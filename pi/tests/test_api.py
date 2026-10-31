@@ -202,3 +202,40 @@ def test_network_and_home(client):
     assert client.get("/api/control/holder", headers=h).json()["multi_user"] is True
     home = client.get("/").text
     assert "Мережа" in home and "addwifi" in home and "sdrdetect" in home
+
+
+def test_audio_and_autoscan(client):
+    import time
+
+    h = {"Authorization": "Bearer secret"}
+    r = client.post("/api/audio/start", json={"freq_hz": 446.0e6, "mod": "nfm", "squelch_db": 10}, headers=h)
+    assert r.status_code == 200 and r.json()["active"] and r.json()["mod"] == "nfm"
+    assert client.post("/api/audio/params", json={"squelch_db": 20, "mod": "am"}, headers=h).json()["mod"] == "am"
+    assert client.post("/api/audio/start", json={"mod": "xx", "freq_hz": 1e8}, headers=h).status_code == 400
+    assert client.post("/api/audio/stop", headers=h).json()["active"] is False
+    r = client.post("/api/control/video_autoscan", json={"on": True, "bands": ["R"]}, headers=h)
+    assert r.status_code == 200 and r.json()["channels"] == 8
+    time.sleep(0.3)
+    assert client.get("/api/status", headers=h).json()["mode"] == "watch"
+    client.post("/api/control/scan", headers=h)
+
+
+def test_audio_demod_tone():
+    """Демодульований звук рації — чистий тон 1 кГц без перевантаження (ЧМ і АМ)."""
+    import numpy as np
+
+    from sdrwatch.dsp.audio import AUDIO_RATE, SDR_RATE, TUNE_OFFSET, AudioDemod
+    from sdrwatch.sources.simulated import Emitter, SimulatedSource
+
+    for mode in ("nfm", "am"):
+        f = 446e6
+        s = SimulatedSource([Emitter(f, mode, power_dbm=-80, bandwidth_hz=20e3)], noise_dbfs=-60)
+        s.set_sample_rate(SDR_RATE)
+        s.set_gain(32, 30, False)
+        s.tune(f + TUNE_OFFSET)
+        d = AudioDemod(mode)
+        pcm = np.concatenate([d.process(s.read(240000), -TUNE_OFFSET)[0] for _ in range(4)][1:]).astype(float)
+        sp = np.abs(np.fft.rfft((pcm - pcm.mean()) * np.hanning(len(pcm))))
+        fr = np.fft.rfftfreq(len(pcm), 1 / AUDIO_RATE)
+        assert abs(fr[np.argmax(sp[5:]) + 5] - 1000) < 20
+        assert 3000 < np.abs(pcm).max() < 32767      # чутно і без кліпінгу

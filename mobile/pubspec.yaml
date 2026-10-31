@@ -43,6 +43,7 @@ dependencies:
   provider: ^6.1.5+1
   app_settings: ^9.0.1
   image_picker: ^1.2.4
+  flutter_pcm_sound: ^3.3.3
 
 dev_dependencies:
   flutter_test:

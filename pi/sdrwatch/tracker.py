@@ -212,7 +212,7 @@ class Tracker:
                 del self.tracks[t.id]
 
         return [t for t in self.tracks.values()
-                if t.state != "lost" and t.id in seen and (t.classification is None or now - t.last_analysis > 15)]
+                if t.state != "lost" and t.id in seen and (t.classification is None or now - t.last_analysis > 30)]
 
     def set_classification(self, t: Track, c: Classification) -> None:
         old = t.classification

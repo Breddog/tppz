@@ -47,7 +47,7 @@ class FullBandConfig:
     stop_hz: float = 0.0
     # Скільки сегментів «повного» діапазону сканувати між проходами пріоритетних діапазонів:
     # FPV-діапазони оновлюються часто, решта ефіру — поступово
-    segments_per_cycle: int = 40
+    segments_per_cycle: int = 16
 
 
 @dataclass
