@@ -152,3 +152,11 @@ def test_transmit_disallowed(tmp_path):
         assert r.status_code == 400 and "вимкнено" in r.json()["detail"]
     finally:
         eng.stop()
+
+
+def test_echo_filter(client):
+    h = {"Authorization": "Bearer secret"}
+    r = client.post("/api/control/echo_filter", json={"on": True, "relearn": True}, headers=h)
+    assert r.status_code == 200 and r.json()["enabled"] is True
+    assert client.get("/api/status", headers=h).json()["echo_filter"]["enabled"] is True
+    assert client.post("/api/control/echo_filter", json={"on": False}, headers=h).json()["enabled"] is False

@@ -45,6 +45,11 @@ class RecordReq(BaseModel):
     on: bool
 
 
+class EchoReq(BaseModel):
+    on: bool
+    relearn: bool = False
+
+
 class TxReq(BaseModel):
     mode: str                       # carrier | tone | bars | image | noise
     freq_hz: float
@@ -280,6 +285,12 @@ def create_app(app_state) -> FastAPI:
     def ctl_record(req: RecordReq):
         st.engine.set_recording(req.on)
         return {"recording": st.engine.recording}
+
+    @app.post("/api/control/echo_filter", dependencies=[Depends(auth)])
+    def ctl_echo(req: EchoReq):
+        res = st.engine.set_echo_filter(req.on, req.relearn)
+        st.cfg.save()
+        return res
 
     # ---- тестовий передавач ----------------------------------------------------------------------
     _tx_image: dict = {"data": None}

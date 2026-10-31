@@ -9,7 +9,9 @@ import '../api.dart';
 import '../live.dart';
 import '../models.dart';
 
-/// Живе відео з аналогового FPV: вибір сигналу/каналу, AFC, інверсія, дескремблювання, запис.
+/// Вкладка «Відео»: ЗАВЖДИ живий екран у реальному часі.
+/// Є сигнал — показує відео, немає — реальний «сніг» (ніколи не чорний/синій екран).
+/// Частота — повзунком по всьому діапазону або вводом. AFC, інверсія, дескремблювання, запис.
 class VideoTab extends StatefulWidget {
   const VideoTab({super.key, required this.api, required this.active});
 
@@ -27,26 +29,33 @@ class _VideoTabState extends State<VideoTab> {
   int _frames = 0;
   double _fps = 0;
   DateTime _fpsT = DateTime.now();
-  List<Map<String, dynamic>> _bands = [];
-  bool _connecting = false;
+  final _mhzCtl = TextEditingController();
+  double _freqMhz = 5800;
+  bool _started = false;
+  Timer? _tuneDebounce;
+  DateTime _lastTune = DateTime.fromMillisecondsSinceEpoch(0);
 
-  bool _watching(LiveConnection l) => l.status['mode'] == 'watch' || l.watch != null;
+  static const _presets = [5800.0, 5658.0, 5880.0, 1200.0, 1280.0, 2440.0, 1080.0];
 
   @override
   void didUpdateWidget(covariant VideoTab old) {
     super.didUpdateWidget(old);
-    if (!widget.active) _close();
+    if (!widget.active) {
+      _close();
+      _started = false;
+    }
   }
 
   @override
   void dispose() {
+    _tuneDebounce?.cancel();
     _close();
     super.dispose();
   }
 
+  // ---- потік відеокадрів ------------------------------------------------------
   void _ensureStream() {
-    if (_ws != null || _connecting || !widget.active) return;
-    _connecting = true;
+    if (_ws != null) return;
     try {
       _ws = WebSocketChannel.connect(Uri.parse(widget.api.wsUrl('/ws/video')));
       _sub = _ws!.stream.listen(
@@ -55,7 +64,7 @@ class _VideoTabState extends State<VideoTab> {
           _frames++;
           final now = DateTime.now();
           final dt = now.difference(_fpsT).inMilliseconds;
-          if (dt > 2000) {
+          if (dt > 1500) {
             _fps = _frames * 1000 / dt;
             _frames = 0;
             _fpsT = now;
@@ -65,8 +74,8 @@ class _VideoTabState extends State<VideoTab> {
         onDone: _close,
         onError: (_) => _close(),
       );
-    } finally {
-      _connecting = false;
+    } catch (_) {
+      _ws = null;
     }
   }
 
@@ -85,90 +94,59 @@ class _VideoTabState extends State<VideoTab> {
     }
   }
 
+  /// Перейти на частоту (МГц). Під час перетягування повзунка — не частіше ніж раз на 150 мс.
+  void _tune(double mhz, {bool immediate = false}) {
+    _freqMhz = mhz.clamp(1, 7250);
+    _mhzCtl.text = _freqMhz.toStringAsFixed(1);
+    setState(() {});
+    void send() {
+      _lastTune = DateTime.now();
+      _do(() => widget.api.watch(freqHz: _freqMhz * 1e6));
+    }
+
+    if (immediate || DateTime.now().difference(_lastTune).inMilliseconds > 150) {
+      send();
+    } else {
+      _tuneDebounce?.cancel();
+      _tuneDebounce = Timer(const Duration(milliseconds: 160), send);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.watch<LiveConnection>();
-    if (_watching(l)) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _ensureStream());
-      return _player(l);
+    final sdr = (l.status['sdr'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final minMhz = ((sdr['min_freq_hz'] as num?)?.toDouble() ?? 1e6) / 1e6;
+    final maxMhz = ((sdr['max_freq_hz'] as num?)?.toDouble() ?? 6e9) / 1e6;
+
+    // Завжди тримаємо режим стеження, щоб екран був живий
+    if (widget.active) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _ensureStream();
+        if (!_started) {
+          _started = true;
+          final cur = (l.watch?['freq_hz'] as num?)?.toDouble() ?? (l.status['watch_freq_hz'] as num?)?.toDouble();
+          if (l.status['mode'] != 'watch') {
+            _tune(cur != null ? cur / 1e6 : _freqMhz, immediate: true);
+          } else if (cur != null) {
+            _freqMhz = cur / 1e6;
+            _mhzCtl.text = _freqMhz.toStringAsFixed(1);
+          }
+        }
+      });
     }
-    _close();
-    return _picker(l);
-  }
 
-  // ---- вибір, що дивитися --------------------------------------------------------------
-  Widget _picker(LiveConnection l) {
-    final vids = l.signals.where((s) => s.active && (s.cls?.canShowVideo ?? false)).toList();
-    final digital = l.signals.where((s) => s.active && s.cls?.code == 'digital_video').toList();
-    return ListView(
-      padding: const EdgeInsets.all(12),
-      children: [
-        const Text('Знайдене аналогове відео', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 6),
-        if (vids.isEmpty)
-          const Text(
-            'Поки що відеосигналів немає. Модуль продовжує сканування.',
-            style: TextStyle(color: Colors.white54),
-          ),
-        for (final s in vids)
-          Card(
-            child: ListTile(
-              leading: s.thumbnailId == null
-                  ? Icon(classIcon(s.cls?.code), color: classColor(s.cls?.code))
-                  : ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.network(
-                        widget.api.authUrl('/api/media/${s.thumbnailId}'),
-                        width: 64,
-                        height: 48,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const Icon(Icons.videocam),
-                      ),
-                    ),
-              title: Text('${fmtFreq(s.freqHz)} ${s.channelName}'),
-              subtitle: Text('${s.cls!.label}\n${s.distanceText}'),
-              isThreeLine: true,
-              trailing: const Icon(Icons.play_circle_fill, color: Colors.redAccent, size: 32),
-              onTap: () => _do(() => widget.api.watch(trackId: s.id, freqHz: s.freqHz)),
-            ),
-          ),
-        if (digital.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          const Text('Цифрове відео (лише класифікація)', style: TextStyle(fontWeight: FontWeight.bold)),
-          for (final s in digital)
-            ListTile(
-              leading: Icon(Icons.hd, color: classColor(s.cls?.code)),
-              title: Text('${fmtFreq(s.freqHz)} · ${s.cls!.subtype}'),
-              subtitle: Text('Зображення зашифроване/цифрове — показати неможливо. ${s.distanceText}'),
-            ),
-        ],
-        const Divider(height: 28),
-        const Text('Налаштуватися вручну', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 8),
-        _ManualTune(api: widget.api, bands: _bands, loadBands: _loadBands),
-      ],
-    );
-  }
-
-  Future<void> _loadBands() async {
-    if (_bands.isNotEmpty) return;
-    final j = await widget.api.get('/api/channels') as Map<String, dynamic>;
-    setState(() => _bands = (j['bands'] as List).cast<Map<String, dynamic>>());
-  }
-
-  // ---- програвач ------------------------------------------------------------------------------
-  Widget _player(LiveConnection l) {
     final w = l.watch;
     final v = (w?['video'] as Map<String, dynamic>?) ?? const {};
-    final opts = (l.status['video_opts'] as Map?)?.cast<String, dynamic>() ?? {};
     final isVideo = v['is_video'] == true;
-    final freq = (w?['freq_hz'] as num?)?.toDouble() ?? (l.status['watch_freq_hz'] as num?)?.toDouble() ?? 0;
     final ch = w?['channel'] as Map<String, dynamic>?;
     final rec = w?['recording'] == true;
-    final searching = w?['searching'] == true;
+    final opts = (l.status['video_opts'] as Map?)?.cast<String, dynamic>() ?? {};
 
-    return Column(
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 20),
       children: [
+        // ---- екран ----
         AspectRatio(
           aspectRatio: 4 / 3,
           child: Container(
@@ -176,34 +154,28 @@ class _VideoTabState extends State<VideoTab> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                if (_frame != null) Image.memory(_frame!, gaplessPlayback: true, fit: BoxFit.contain),
-                if (_frame == null || !isVideo)
-                  Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (searching) const CircularProgressIndicator(),
-                        const SizedBox(height: 8),
-                        Text(
-                          searching ? 'Сигнал втрачено — пошук по сітці каналів…' : 'Немає синхронізації відео',
-                          style: const TextStyle(color: Colors.white70),
-                        ),
-                      ],
-                    ),
+                if (_frame != null)
+                  Image.memory(_frame!, gaplessPlayback: true, fit: BoxFit.fill, filterQuality: FilterQuality.low)
+                else
+                  const Center(
+                    child: Text('Підключення до відеопотоку…', style: TextStyle(color: Colors.white54)),
                   ),
                 Positioned(
                   left: 8,
                   top: 8,
                   child: _Osd(
                     lines: [
-                      '${fmtFreq(freq)}${ch != null ? '  ${ch['name']} (${((ch['offset_hz'] as num) / 1e6).toStringAsFixed(1)} МГц)' : ''}',
+                      '${_freqMhz.toStringAsFixed(1)} МГц'
+                          '${ch != null ? '  ${ch['name']}' : ''}',
                       if (isVideo)
-                        '${v['standard']} · SNR ${v['snr_db']} дБ · синхро ${((v['sync_score'] as num) * 100).round()}%',
-                      if (v['inverted'] == true) 'Інвертоване — виправлено',
-                      if (v['scrambled'] != null)
-                        'Скремблювання: ${v['scrambled']}${v['descrambled'] == true ? ' (дескрембльовано)' : ''}',
-                      '${_fps.toStringAsFixed(1)} кадр/с',
+                        '${v['standard']} · SNR ${v['snr_db']} дБ · синхро ${((v['sync_score'] as num) * 100).round()}%'
+                      else
+                        'немає відео — сніг (сигналу нема або він слабкий)',
+                      if (v['inverted'] == true) 'інверсія — виправлено',
+                      if (v['scrambled'] != null) 'скремблювання: ${v['scrambled']}',
+                      '${_fps.toStringAsFixed(0)} кадр/с',
                     ],
+                    good: isVideo,
                   ),
                 ),
                 if (rec)
@@ -220,84 +192,134 @@ class _VideoTabState extends State<VideoTab> {
                       ],
                     ),
                   ),
+                if (l.status['sdr_connected'] == false)
+                  const Positioned(
+                    bottom: 8,
+                    left: 8,
+                    child: Text('SDR не підключено', style: TextStyle(color: Colors.orangeAccent)),
+                  ),
               ],
             ),
           ),
         ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.all(10),
+
+        // ---- частота ----
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+          child: Row(
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _RoundBtn(icon: Icons.keyboard_double_arrow_left, label: '−5', onTap: () => _tune(freq - 5e6)),
-                  _RoundBtn(icon: Icons.chevron_left, label: '−0.5', onTap: () => _tune(freq - 0.5e6)),
-                  _RoundBtn(
-                    icon: rec ? Icons.stop_circle : Icons.fiber_manual_record,
-                    label: rec ? 'Стоп' : 'Запис',
-                    color: Colors.redAccent,
-                    onTap: () => _do(() => widget.api.record(!rec)),
+              Expanded(
+                child: TextField(
+                  controller: _mhzCtl,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Частота, МГц',
+                    isDense: true,
+                    border: OutlineInputBorder(),
                   ),
-                  _RoundBtn(icon: Icons.chevron_right, label: '+0.5', onTap: () => _tune(freq + 0.5e6)),
-                  _RoundBtn(icon: Icons.keyboard_double_arrow_right, label: '+5', onTap: () => _tune(freq + 5e6)),
-                ],
+                  onSubmitted: (s) {
+                    final v = double.tryParse(s.replaceAll(',', '.'));
+                    if (v != null) _tune(v, immediate: true);
+                  },
+                ),
               ),
-              const SizedBox(height: 10),
-              const Text('Полярність відео', style: TextStyle(color: Colors.white54)),
-              const SizedBox(height: 4),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'auto', label: Text('Авто')),
-                  ButtonSegment(value: 'normal', label: Text('Звичайна')),
-                  ButtonSegment(value: 'inverted', label: Text('Інверсна')),
-                ],
-                selected: {opts['invert'] == null ? 'auto' : (opts['invert'] == true ? 'inverted' : 'normal')},
-                onSelectionChanged: (s) => _setOpts(switch (s.first) {
-                  'auto' => {'invert_auto': true},
-                  'inverted' => {'invert': true},
-                  _ => {'invert': false},
-                }),
+              _StepBtn(label: '−5', onTap: () => _tune(_freqMhz - 5, immediate: true)),
+              _StepBtn(label: '−1', onTap: () => _tune(_freqMhz - 1, immediate: true)),
+              _StepBtn(label: '+1', onTap: () => _tune(_freqMhz + 1, immediate: true)),
+              _StepBtn(label: '+5', onTap: () => _tune(_freqMhz + 5, immediate: true)),
+            ],
+          ),
+        ),
+        // Повзунок по всьому діапазону SDR
+        Slider(
+          value: _freqMhz.clamp(minMhz, maxMhz),
+          min: minMhz,
+          max: maxMhz,
+          label: '${_freqMhz.toStringAsFixed(0)} МГц',
+          onChanged: (v) => _tune(v),
+          onChangeEnd: (v) => _tune(v, immediate: true),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(minMhz.toStringAsFixed(0), style: const TextStyle(color: Colors.white38, fontSize: 11)),
+              Text('${maxMhz.toStringAsFixed(0)} МГц', style: const TextStyle(color: Colors.white38, fontSize: 11)),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 40,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            children: [
+              for (final p in _presets)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ActionChip(label: Text(p.toStringAsFixed(0)), onPressed: () => _tune(p, immediate: true)),
+                ),
+            ],
+          ),
+        ),
+
+        // ---- швидкий перехід на знайдене відео ----
+        _VideoSignals(onTune: (hz) => _tune(hz / 1e6, immediate: true)),
+
+        // ---- керування ----
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Wrap(
+            spacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                icon: Icon(rec ? Icons.stop : Icons.fiber_manual_record, color: Colors.redAccent),
+                label: Text(rec ? 'Стоп запис' : 'Запис'),
+                onPressed: () => _do(() => widget.api.record(!rec)),
               ),
-              SwitchListTile(
-                dense: true,
-                title: const Text('Автопідстроювання частоти (AFC)'),
-                subtitle: const Text('Тримає несучу по центру, навіть якщо VTX «пливе»'),
-                value: opts['afc'] ?? true,
-                onChanged: (v) => _setOpts({'afc': v}),
-              ),
-              SwitchListTile(
-                dense: true,
-                title: const Text('Автоконтраст'),
-                value: opts['auto_contrast'] ?? true,
-                onChanged: (v) => _setOpts({'auto_contrast': v}),
-              ),
-              SwitchListTile(
-                dense: true,
-                title: const Text('Дескремблювання'),
-                subtitle: const Text('Спроба відновити кодоване відео (зсув/інверсія рядків)'),
-                value: opts['descramble'] ?? true,
-                onChanged: (v) => _setOpts({'descramble': v}),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
+              FilledButton.tonalIcon(
                 icon: const Icon(Icons.radar),
-                label: const Text('Повернутися до сканування'),
+                label: const Text('Сканування'),
                 onPressed: () => _do(() async {
                   final st = await widget.api.post('/api/control/scan');
                   l.status = st as Map<String, dynamic>;
                   l.watch = null;
-                  setState(() => _frame = null);
+                  _started = false;
+                  setState(() {});
                 }),
               ),
             ],
           ),
         ),
+        SwitchListTile(
+          dense: true,
+          title: const Text('Автопідстроювання частоти (AFC)'),
+          value: opts['afc'] ?? true,
+          onChanged: (x) => _setOpts({'afc': x}),
+        ),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'auto', label: Text('Авто')),
+            ButtonSegment(value: 'normal', label: Text('Норм.')),
+            ButtonSegment(value: 'inverted', label: Text('Інв.')),
+          ],
+          selected: {opts['invert'] == null ? 'auto' : (opts['invert'] == true ? 'inverted' : 'normal')},
+          onSelectionChanged: (s) => _setOpts(switch (s.first) {
+            'auto' => {'invert_auto': true},
+            'inverted' => {'invert': true},
+            _ => {'invert': false},
+          }),
+        ),
+        SwitchListTile(
+          dense: true,
+          title: const Text('Дескремблювання'),
+          value: opts['descramble'] ?? true,
+          onChanged: (x) => _setOpts({'descramble': x}),
+        ),
       ],
     );
   }
-
-  Future<void> _tune(double hz) => _do(() => widget.api.watch(freqHz: hz));
 
   Future<void> _setOpts(Map<String, dynamic> o) => _do(() async {
     final r = await widget.api.post('/api/control/video', o) as Map<String, dynamic>;
@@ -309,9 +331,10 @@ class _VideoTabState extends State<VideoTab> {
 }
 
 class _Osd extends StatelessWidget {
-  const _Osd({required this.lines});
+  const _Osd({required this.lines, this.good = false});
 
   final List<String> lines;
+  final bool good;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -319,114 +342,82 @@ class _Osd extends StatelessWidget {
     decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(6)),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [for (final s in lines) Text(s, style: const TextStyle(fontSize: 11, color: Colors.white))],
+      children: [
+        for (var i = 0; i < lines.length; i++)
+          Text(
+            lines[i],
+            style: TextStyle(
+              fontSize: 11,
+              color: i == 1 ? (good ? Colors.greenAccent : Colors.orangeAccent) : Colors.white,
+              fontWeight: i == 0 ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+      ],
     ),
   );
 }
 
-class _RoundBtn extends StatelessWidget {
-  const _RoundBtn({required this.icon, required this.label, required this.onTap, this.color});
+class _StepBtn extends StatelessWidget {
+  const _StepBtn({required this.label, required this.onTap});
 
-  final IconData icon;
   final String label;
   final VoidCallback onTap;
-  final Color? color;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      IconButton.filledTonal(
-        icon: Icon(icon, color: color),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(left: 4),
+    child: SizedBox(
+      width: 40,
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(padding: EdgeInsets.zero, minimumSize: const Size(40, 44)),
         onPressed: onTap,
+        child: Text(label),
       ),
-      Text(label, style: const TextStyle(fontSize: 11, color: Colors.white54)),
-    ],
+    ),
   );
 }
 
-class _ManualTune extends StatefulWidget {
-  const _ManualTune({required this.api, required this.bands, required this.loadBands});
+/// Горизонтальний список знайденого відео — тап переводить екран на нього.
+class _VideoSignals extends StatelessWidget {
+  const _VideoSignals({required this.onTune});
 
-  final ApiClient api;
-  final List<Map<String, dynamic>> bands;
-  final Future<void> Function() loadBands;
-
-  @override
-  State<_ManualTune> createState() => _ManualTuneState();
-}
-
-class _ManualTuneState extends State<_ManualTune> {
-  final _mhz = TextEditingController();
-  String? _band;
-
-  @override
-  void initState() {
-    super.initState();
-    widget.loadBands().catchError((_) {});
-  }
-
-  Future<void> _go(double hz) async {
-    try {
-      await widget.api.watch(freqHz: hz);
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
-    }
-  }
+  final void Function(double hz) onTune;
 
   @override
   Widget build(BuildContext context) {
-    final analog = widget.bands.where((b) => b['kind'] == 'analog').toList();
-    final band = analog.where((b) => b['code'] == _band).firstOrNull;
+    final l = context.watch<LiveConnection>();
+    final vids = l.signals
+        .where((s) => s.active && ((s.cls?.canShowVideo ?? false) || s.cls?.code == 'digital_video'))
+        .toList();
+    if (vids.isEmpty) return const SizedBox(height: 4);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _mhz,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: 'Частота, МГц', hintText: '5800'),
-              ),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              onPressed: () {
-                final v = double.tryParse(_mhz.text.replaceAll(',', '.'));
-                if (v != null) _go(v * 1e6);
-              },
-              child: const Text('Дивитися'),
-            ),
-          ],
+        const Padding(
+          padding: EdgeInsets.fromLTRB(14, 8, 14, 2),
+          child: Text(
+            'Знайдене відео — натисніть, щоб подивитися',
+            style: TextStyle(color: Colors.white54, fontSize: 12),
+          ),
         ),
-        const SizedBox(height: 12),
-        const Text('Або оберіть канал із відомої сітки:', style: TextStyle(color: Colors.white54)),
-        Wrap(
-          spacing: 6,
-          children: [
-            for (final b in analog)
-              ChoiceChip(
-                label: Text(b['code'] as String),
-                selected: _band == b['code'],
-                onSelected: (_) => setState(() => _band = b['code'] as String),
-              ),
-          ],
-        ),
-        if (band != null) ...[
-          const SizedBox(height: 6),
-          Text(band['title'] as String, style: const TextStyle(color: Colors.white54)),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
+        SizedBox(
+          height: 44,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
             children: [
-              for (final c in (band['channels'] as List).cast<Map<String, dynamic>>())
-                ActionChip(
-                  label: Text('${c['name']} · ${((c['freq_hz'] as num) / 1e6).toStringAsFixed(0)}'),
-                  onPressed: () => _go((c['freq_hz'] as num).toDouble()),
+              for (final s in vids)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ActionChip(
+                    avatar: Icon(classIcon(s.cls?.code), size: 16, color: classColor(s.cls?.code)),
+                    label: Text('${fmtFreq(s.freqHz)}${s.channelName.isNotEmpty ? ' ${s.channelName}' : ''}'),
+                    onPressed: () => onTune(s.freqHz),
+                  ),
                 ),
             ],
           ),
-        ],
+        ),
       ],
     );
   }

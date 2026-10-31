@@ -77,3 +77,26 @@ def test_tx_video_roundtrip():
     iq = np.tile(wf, int(np.ceil(fs * 0.05 / len(wf))))[: int(fs * 0.05)]
     r = demodulate(iq.astype(np.complex64), fs)
     assert r.is_video and r.image.std() > 30     # у кадрі є контраст (біла рамка)
+
+
+def test_raw_raster_always_produces_frame():
+    """Растр завжди є: сніг при відсутності сигналу, картинка при відео."""
+    import numpy as np
+
+    from sdrwatch import transmitter as tx
+    from sdrwatch.dsp.video import raw_raster
+    from sdrwatch.sources.simulated import SimulatedSource
+
+    fs = 20e6
+    # Шум → сніг з контрастом (не чорний екран)
+    s = SimulatedSource([], noise_dbfs=-55)
+    s.set_sample_rate(fs)
+    s.set_gain(32, 30, False)
+    s.tune(5800e6)
+    snow = raw_raster(s.read(int(fs * 0.02)), fs)
+    assert snow.shape == (288, 480) and snow.std() > 20
+
+    # Відео → растр теж має контраст (видно картинку навіть без синхро)
+    wf = tx.build_waveform("bars", fs, standard="PAL")
+    iq = np.tile(wf, int(np.ceil(fs * 0.02 / len(wf))))[: int(fs * 0.02)]
+    assert raw_raster(iq.astype(np.complex64), fs).std() > 20

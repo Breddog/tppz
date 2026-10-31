@@ -64,6 +64,8 @@ class DspConfig:
     lost_timeout_s: float = 6.0
     # Чутливість відео-аналізу (тривалість запису IQ на один аналіз, с)
     video_capture_s: float = 0.045
+    # Ехо-фільтр: вивчити сталі шуми/завади при старті й не реагувати на них
+    echo_filter: bool = False
 
 
 @dataclass

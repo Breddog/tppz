@@ -56,6 +56,8 @@ class Panorama:
     cursor: int = 0
     pass_started: float = field(default_factory=time.time)
     pass_s: float = 0.0         # тривалість останнього повного проходу
+    static_db: np.ndarray | None = None   # ехо-фільтр: рівень сталих шумів/завад (за бінами)
+    learn_left: int = 0                   # скільки ще проходів «вивчати» сталий фон
 
     def freqs(self, sl: slice) -> np.ndarray:
         return self.start_hz + (np.arange(sl.start, sl.stop) + 0.5) * self.bin_hz
@@ -174,7 +176,8 @@ class Engine:
                     raise ValueError("Потрібна частота або id сигналу")
                 self.watch_freq = float(freq_hz)
                 self.watch_track = track_id
-                self.watch_status = {"lost_since": None}
+                # Ручне стеження (повзунок/ввід частоти) — без автопошуку по сітці, стоїмо де сказали
+                self.watch_status = {"lost_since": None, "manual": track_id is None}
             else:
                 self._close_clip()
                 self.recording = False
@@ -260,6 +263,24 @@ class Engine:
             finally:
                 self._tx_active = False
 
+    def set_echo_filter(self, on: bool, relearn: bool = False, learn_sweeps: int = 2) -> dict:
+        """Ехо-фільтр сталих шумів. relearn — перевчити базову лінію з поточного ефіру."""
+        self.cfg.dsp.echo_filter = bool(on)
+        for p in self.panoramas:
+            if not on:
+                p.static_db = None
+                p.learn_left = 0
+            elif relearn or p.static_db is None:
+                p.static_db = np.full(len(p.spec), np.nan, np.float32)
+                p.learn_left = max(1, learn_sweeps)
+        self._reconf.set()
+        return self.echo_status()
+
+    def echo_status(self) -> dict:
+        learning = any(p.learn_left > 0 for p in self.panoramas)
+        return {"enabled": self.cfg.dsp.echo_filter, "learning": learning,
+                "learn_left": max((p.learn_left for p in self.panoramas), default=0)}
+
     def set_recording(self, on: bool) -> None:
         with self._lock:
             self.recording = on
@@ -324,6 +345,10 @@ class Engine:
                 pans.append(Panorama(FULL_BAND_INDEX, "Повний діапазон", lo, hi, bin_hz, centers, usable,
                                      np.full(nb, np.nan, np.float32), np.full(nb, -200.0, np.float32),
                                      spectrum.NoiseFloorTracker(nb), full=True))
+        if self.cfg.dsp.echo_filter:
+            for p in pans:
+                p.static_db = np.full(len(p.spec), np.nan, np.float32)
+                p.learn_left = 2
         self.panoramas = pans
         self._need_plan = False
 
@@ -456,6 +481,19 @@ class Engine:
             pano.spec[psl] = seg
             pano.peak_hold[psl] = np.maximum(pano.peak_hold[psl] - 0.2, seg)
             floor = pano.floor.update(psl, seg)
+            # Ехо-фільтр: вивчаємо сталий фон (власні завади, спури Pi/USB, постійні передавачі),
+            # а потім піднімаємо поріг там, де цей фон завжди є — щоб не реагувати на нього.
+            if pano.static_db is not None and pano.learn_left > 0:
+                stat = pano.static_db[psl]
+                pano.static_db[psl] = np.where(np.isnan(stat), seg, np.maximum(stat, seg))
+                continue   # поки вчимося — не детектуємо (щоб сталі завади не стали сигналами)
+            if pano.static_db is not None:
+                stat = np.nan_to_num(pano.static_db[psl], nan=-300.0)
+                # Розширюємо завадy на ±2 біни (спектральне розтікання) і лишаємо 4 дБ запасу,
+                # щоб коливання підсилення не «проривали» фільтр
+                stat = np.maximum.reduce([stat, np.roll(stat, 1), np.roll(stat, -1),
+                                          np.roll(stat, 2), np.roll(stat, -2)])
+                floor = np.maximum(floor, stat - 4.0)
             dets += spectrum.detect(seg, floor, pano.freqs(psl), d.threshold_db, d.min_bandwidth_hz)
         lo_hz, hi_hz, timeout = pano.start_hz, pano.stop_hz, None
         if pano.full:
@@ -467,10 +505,14 @@ class Engine:
                 pano.sweeps += 1
                 pano.pass_s = time.time() - pano.pass_started
                 pano.pass_started = time.time()
+                if pano.learn_left > 0:
+                    pano.learn_left -= 1
             # Сюди повертаємось лише раз за повний прохід — втрата лише після кількох пропусків
             timeout = max(self.cfg.dsp.lost_timeout_s, 2.5 * (pano.pass_s or 30.0))
         else:
             pano.sweeps += 1
+            if pano.learn_left > 0:
+                pano.learn_left -= 1
         dets = spectrum.absorb_satellites(spectrum.merge_edge_detections(dets))
         to_analyze = self.tracker.update(dets, pano.name, lo_hz, hi_hz, 0.0, lost_timeout_s=timeout)
         if pano.full:
@@ -677,22 +719,26 @@ class Engine:
                                descramble=self.video_opts["descramble"])
         st = self.watch_status
         now = time.time()
+        manual = st.get("manual", False)   # ручне сканування повзунком — без «полювання»
+        # ЗАВЖДИ віддаємо кадр: є відео — картинка, немає — реальний сніг (ніколи не чорний/синій екран)
+        img = res.image if (res.is_video and res.image is not None) else video.raw_raster(iq, fs)
+        data, mime = encode(img)
+        self.hub.publish("video", data)
+        if self.recording:
+            if self.clip is None or self.clip.full:
+                self._close_clip()
+                self.clip = ClipWriter(self.storage, f, "Запис стеження", max_s=self.cfg.storage.video_clip_s)
+            self.clip.add(data, mime)
+
         if res.is_video:
             st["lost_since"] = None
+            st["hunt"] = None
             if self.video_opts["afc"] and abs(res.afc_offset_hz) > 150e3:
                 # Плавне доналаштування на відео (AFC) — не більше 1 МГц за крок
                 self.watch_freq = f + float(np.clip(res.afc_offset_hz * 0.4, -1e6, 1e6))
-            if res.image is not None:
-                data, mime = encode(res.image)
-                self.hub.publish("video", data)
-                if self.recording:
-                    if self.clip is None or self.clip.full:
-                        self._close_clip()
-                        self.clip = ClipWriter(self.storage, f, "Запис стеження", max_s=self.cfg.storage.video_clip_s)
-                    self.clip.add(data, mime)
-        else:
+        elif not manual:
             st["lost_since"] = st.get("lost_since") or now
-            # Сигнал зник більше ніж на 2 с — шукаємо по сітці каналів
+            # Сигнал зник більше ніж на 2 с — шукаємо по сітці каналів (лише у режимі стеження за сигналом)
             if now - st["lost_since"] > 2.0:
                 hunt = st.get("hunt")
                 if not hunt:
@@ -709,7 +755,7 @@ class Engine:
         self.hub.publish("live", {
             "type": "watch", "freq_hz": round(self.watch_freq), "video": res.to_dict(),
             "channel": m.to_dict() if m else None, "recording": self.recording,
-            "searching": bool(st.get("hunt")), "ts": now,
+            "manual": manual, "searching": bool(st.get("hunt")), "ts": now,
         })
 
     def _close_clip(self) -> None:
@@ -772,6 +818,7 @@ class Engine:
             "watch_freq_hz": self.watch_freq,
             "recording": self.recording,
             "tx": self.tx_status(),
+            "echo_filter": self.echo_status(),
             "gain": {"lna": self.gain[0], "vga": self.gain[1], "amp": self.gain[2],
                      "auto": self.cfg.sdr.auto_gain},
             "video_opts": self.video_opts,

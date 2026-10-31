@@ -168,6 +168,28 @@ def _analyze_scramble(img: np.ndarray, try_descramble: bool) -> tuple[str | None
     return "unknown", float(corr), img, False
 
 
+def raw_raster(iq: np.ndarray, fs: float, offset_hz: float = 0.0, width: int = OUT_WIDTH,
+               height: int = 288, video_bw_hz: float = 6e6) -> np.ndarray:
+    """Растр прямо з ЧМ-демодуляції, БЕЗ синхронізації: завжди щось показує.
+
+    Коли сигналу немає — це справжній «сніг» (смугообмежений шум приймача), а не чорний екран.
+    Коли є відео, але синхронізація ще не зловлена — видно «рухому» картинку. Нічого не вигадується:
+    яскравість береться з реального сигналу.
+    """
+    x = mix(iq, offset_hz, fs) if offset_hz else iq
+    x = fir(x, lowpass_taps(min(0.45, max(video_bw_hz, 1e6) / fs), 21))
+    hz = fm_demod(x, fs).astype(np.float32)
+    # Згладити до «відеосмуги», щоб шум виглядав як аналоговий сніг, а не піксельна каша
+    k = max(1, int(round(fs / (2 * width / 64e-6))))
+    if k > 1:
+        hz = moving_average(hz, k)
+    n = width * height
+    y = hz[:n] if len(hz) >= n else np.resize(hz, n)
+    lo, hi = np.percentile(y, [2, 98])
+    img = np.clip((y - lo) / (hi - lo + 1e-9) * 255.0, 0, 255).astype(np.uint8)
+    return img.reshape(height, width)
+
+
 def demodulate(iq: np.ndarray, fs: float, offset_hz: float = 0.0, *, force_invert: bool | None = None,
                auto_contrast: bool = True, descramble: bool = True) -> VideoResult:
     """Повний ланцюг: IQ → композит → кадр (uint8 H×W)."""

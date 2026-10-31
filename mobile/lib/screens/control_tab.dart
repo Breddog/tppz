@@ -205,6 +205,37 @@ class _ControlTabState extends State<ControlTab> {
           ),
 
           _h('Виявлення сигналів'),
+          Builder(
+            builder: (_) {
+              final echo = (l.status['echo_filter'] as Map?)?.cast<String, dynamic>() ?? const {};
+              return Column(
+                children: [
+                  SwitchListTile(
+                    title: const Text('Ехо-фільтр сталих шумів'),
+                    subtitle: Text(
+                      echo['learning'] == true
+                          ? 'Вивчає сталий фон… (${echo['learn_left']})'
+                          : 'Вивчити постійні завади (спури, свої передавачі) й не реагувати на них',
+                    ),
+                    value: (echo['enabled'] as bool?) ?? (dsp['echo_filter'] as bool? ?? false),
+                    onChanged: (v) => _call(() => widget.api.post('/api/control/echo_filter', {'on': v})),
+                  ),
+                  if (echo['enabled'] == true)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Перевчити фон зараз'),
+                        onPressed: () => _call(
+                          () => widget.api.post('/api/control/echo_filter', {'on': true, 'relearn': true}),
+                          'Вивчаю сталий фон…',
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
           _slider(
             'Поріг над шумом',
             (dsp['threshold_db'] as num).toDouble(),
