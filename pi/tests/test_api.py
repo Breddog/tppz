@@ -50,7 +50,8 @@ def test_pairing_closed(tmp_path):
     cfg._path = str(tmp_path / "c.json")
     cfg.api.token = "secret"
     cfg.api.pairing_window_s = 0
-    st = Storage(str(tmp_path / "st"), 50)
+    cfg.storage.path = str(tmp_path / "st")
+    st = Storage(cfg.storage.path, 50)
     eng = Engine(cfg, SimulatedSource(), st, None, Hub())
     c = TestClient(create_app(AppState(cfg, eng, st, Hub(), "sdr-test")))
     assert c.get("/api/pair").status_code == 403
