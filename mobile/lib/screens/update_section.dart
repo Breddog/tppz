@@ -30,7 +30,7 @@ class UpdateSection extends StatefulWidget {
 }
 
 class _UpdateSectionState extends State<UpdateSection> {
-  static const _assets = {'pi': 'sdrwatch-pi.tar.gz', 'hackrf': 'hackrf_one_usb-sdrwatch.bin'};
+  static const _assets = {'pi': 'sdrwatch-pi.tar.gz', 'hackrf': 'hackrf_one_usb.bin'};
 
   Map<String, dynamic>? _info;
   Map<String, _Release> _latest = {};
@@ -198,8 +198,8 @@ class _UpdateSectionState extends State<UpdateSection> {
     final piRel = _latest['pi'];
     final hfRel = _latest['hackrf'];
     final piNewer = piRel != null && (build == null || piRel.number > (int.tryParse(build.split('-').last) ?? 0));
-    // На HackRF ще стокова прошивка — пропонуємо редакцію SDR Watch («лише приймання»)
-    final hfNewer = hfRel != null && (fw == null || !fw.contains('sdrwatch'));
+    // Пропонуємо прошити, якщо версія в релізі новіша за встановлену (інакше — «перепрошити»)
+    final hfNewer = hfRel != null && fw != null && !fw.contains(hfRel.tag.replaceFirst('hackrf-', ''));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -218,16 +218,12 @@ class _UpdateSectionState extends State<UpdateSection> {
         ListTile(
           leading: const Icon(Icons.settings_input_antenna),
           title: const Text('Прошивка HackRF'),
-          subtitle: Text(
-            fw == null
-                ? 'невідомо (HackRF не підключено або інший SDR)'
-                : '$fw${i?['rx_only_firmware'] == true ? ' · лише приймання' : ' · стокова'}',
-          ),
+          subtitle: Text(fw ?? 'невідомо (HackRF не підключено або інший SDR)'),
           trailing: hfRel == null
               ? null
               : FilledButton.tonal(
                   onPressed: busy ? null : () => _install('hackrf'),
-                  child: Text(hfNewer ? 'Прошити ${hfRel.tag}' : 'Перепрошити (${hfRel.tag})'),
+                  child: Text(hfNewer ? 'Оновити ${hfRel.tag}' : 'Перепрошити (${hfRel.tag})'),
                 ),
         ),
         Padding(

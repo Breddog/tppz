@@ -45,6 +45,14 @@ class RecordReq(BaseModel):
     on: bool
 
 
+class TxReq(BaseModel):
+    mode: str                       # carrier | tone | bars | image | noise
+    freq_hz: float
+    gain_db: float | None = None
+    standard: str | None = None     # PAL | NTSC (для відео)
+    seconds: float | None = None
+
+
 class CalibrateReq(BaseModel):
     freq_hz: float
     distance_m: float
@@ -272,6 +280,39 @@ def create_app(app_state) -> FastAPI:
     def ctl_record(req: RecordReq):
         st.engine.set_recording(req.on)
         return {"recording": st.engine.recording}
+
+    # ---- тестовий передавач ----------------------------------------------------------------------
+    _tx_image: dict = {"data": None}
+
+    @app.get("/api/tx", dependencies=[Depends(auth)])
+    def tx_status():
+        return st.engine.tx_status()
+
+    @app.post("/api/tx/image", dependencies=[Depends(auth)])
+    async def tx_image(request: Request):
+        """Завантажити картинку для режиму відео (тіло — байти зображення)."""
+        from .transmitter import load_image
+        data = await request.body()
+        try:
+            img = load_image(data)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"Не вдалося прочитати зображення: {e}") from e
+        _tx_image["data"] = img
+        return {"ok": True, "width": img.shape[1], "height": img.shape[0]}
+
+    @app.post("/api/tx/start", dependencies=[Depends(auth)])
+    def tx_start(req: TxReq):
+        img = _tx_image["data"] if req.mode == "image" else None
+        if req.mode == "image" and img is None:
+            raise HTTPException(400, "Спершу завантажте картинку (/api/tx/image)")
+        try:
+            return st.engine.start_transmit(req.mode, req.freq_hz, req.gain_db, req.standard, img, req.seconds)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/tx/stop", dependencies=[Depends(auth)])
+    def tx_stop():
+        return st.engine.stop_transmit()
 
     @app.post("/api/calibrate", dependencies=[Depends(auth)])
     def calibrate(req: CalibrateReq):

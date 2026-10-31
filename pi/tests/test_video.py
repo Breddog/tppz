@@ -55,3 +55,25 @@ def test_afc_reports_carrier_offset():
     a = demodulate(capture("analog", offset=0), FS).afc_offset_hz
     b = demodulate(capture("analog", offset=1.5e6), FS).afc_offset_hz
     assert abs((b - a) - 1.5e6) < 0.3e6
+
+
+def test_tx_video_roundtrip():
+    """Згенерований тестовий відеосигнал має прийматися й декодуватися (як на реальному приймачі)."""
+    import numpy as np
+
+    from sdrwatch import transmitter as tx
+    from sdrwatch.dsp.video import demodulate
+
+    fs = 20e6
+    for std in ("PAL", "NTSC"):
+        wf = tx.build_waveform("bars", fs, standard=std)
+        iq = np.tile(wf, int(np.ceil(fs * 0.05 / len(wf))))[: int(fs * 0.05)]
+        r = demodulate(iq.astype(np.complex64), fs)
+        assert r.is_video and r.standard == std and r.sync_score > 0.9
+
+    img = np.zeros((240, 320), np.float32)
+    img[60:180, 80:240] = 1.0
+    wf = tx.build_waveform("image", fs, image=img, standard="PAL")
+    iq = np.tile(wf, int(np.ceil(fs * 0.05 / len(wf))))[: int(fs * 0.05)]
+    r = demodulate(iq.astype(np.complex64), fs)
+    assert r.is_video and r.image.std() > 30     # у кадрі є контраст (біла рамка)

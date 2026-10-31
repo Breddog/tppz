@@ -16,29 +16,24 @@ jobs:
       - uses: actions/checkout@v4
       - name: Інструменти
         run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake python3-yaml
-      - name: Офіційний код HackRF + патчі SDR Watch
+      - name: Офіційний код HackRF
         run: |
           TAG=$(cat hackrf/UPSTREAM_TAG)
           git clone --depth 1 --branch "$TAG" --recurse-submodules --shallow-submodules \
             https://github.com/greatscottgadgets/hackrf.git upstream
-          cd upstream
-          for p in ../hackrf/patches/*.patch; do echo "== $p"; git apply --verbose "$p"; done
-          echo "FW_VERSION=${TAG#v}-sdrwatch-rx" >> $GITHUB_ENV
-      - name: Збірка (HackRF One, усі ревізії)
+          echo "FW_VERSION=${TAG#v}" >> $GITHUB_ENV
+      - name: Збірка прошивки (HackRF One, усі ревізії)
         run: |
           mkdir -p upstream/firmware/build && cd upstream/firmware/build
-          cmake .. -DBOARD=HACKRF_ONE -DSDRWATCH_RX_ONLY=ON -DVERSION="$FW_VERSION"
-          make -j"$(nproc)" hackrf_usb
-          ls -la hackrf_usb
-      - name: Перевірка патча в бінарнику
-        run: |
-          strings upstream/firmware/build/hackrf_usb/hackrf_usb.bin | grep -F "$FW_VERSION"
+          cmake .. -DBOARD=HACKRF_ONE
+          make -j"$(nproc)"
+          find . -name 'hackrf_usb.bin'
       - name: Файли релізу
         run: |
           mkdir -p dist
-          cp upstream/firmware/build/hackrf_usb/hackrf_usb.bin dist/hackrf_one_usb-sdrwatch.bin
-          cp upstream/firmware/build/hackrf_usb/hackrf_usb.dfu dist/hackrf_one_usb-sdrwatch.dfu 2>/dev/null || true
-          (cd dist && sha256sum hackrf_one_usb-sdrwatch.bin > hackrf_one_usb-sdrwatch.bin.sha256)
+          cp upstream/firmware/build/hackrf_usb/hackrf_usb.bin dist/hackrf_one_usb.bin
+          cp upstream/firmware/build/hackrf_usb/hackrf_usb.dfu dist/hackrf_one_usb.dfu 2>/dev/null || true
+          (cd dist && sha256sum hackrf_one_usb.bin > hackrf_one_usb.bin.sha256)
           echo "$FW_VERSION" > dist/VERSION.txt
       - uses: softprops/action-gh-release@v2
         with:
@@ -47,6 +42,5 @@ jobs:
           prerelease: true
           files: dist/*
           body: |
-            Прошивка HackRF One — редакція SDR Watch: офіційна ${{ env.FW_VERSION }} + режим «лише приймання».
-            Оновлення з застосунку: модуль → «Керування» → «Оновлення» → «Прошити HackRF».
-            Опис і відновлення: hackrf/README.md.
+            Офіційна прошивка HackRF One ${{ env.FW_VERSION }} (без змін), зібрана для оновлення з застосунку.
+            Оновлення: модуль → «Керування» → «Оновлення» → «Прошити HackRF». Опис: hackrf/README.md.

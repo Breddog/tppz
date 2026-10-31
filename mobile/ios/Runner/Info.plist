@@ -66,6 +66,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Доступ до фото потрібен, щоб передати картинку як тестове відео</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Камера потрібна, щоб відсканувати QR-код модуля SDR Watch</string>
 	<key>NSLocalNetworkUsageDescription</key>

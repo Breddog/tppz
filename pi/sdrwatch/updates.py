@@ -19,7 +19,7 @@ import urllib.request
 KINDS = {
     # тип: (префікс тегу релізу, ім'я файлу в релізі, максимальний розмір)
     "pi": ("pi-", "sdrwatch-pi.tar.gz", 50 * 1024 * 1024),
-    "hackrf": ("hackrf-", "hackrf_one_usb-sdrwatch.bin", 2 * 1024 * 1024),
+    "hackrf": ("hackrf-", "hackrf_one_usb.bin", 2 * 1024 * 1024),
 }
 
 

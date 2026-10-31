@@ -115,6 +115,18 @@ class UpdateConfig:
 
 
 @dataclass
+class TxConfig:
+    # Тестовий передавач. Дозвіл має увімкнути власник (правова відповідальність за ефір).
+    allow: bool = True
+    # Передавач сам вимикається через стільки секунд (захист від «забув вимкнути»)
+    max_seconds: float = 300.0
+    # Підсилення передачі за замовчуванням (HackRF VGA 0..47 дБ). Починайте з малого!
+    default_gain_db: float = 20.0
+    default_standard: str = "PAL"
+    sample_rate: float = 16e6
+
+
+@dataclass
 class Config:
     name: str = "SDR-модуль"
     latitude: float | None = None
@@ -127,6 +139,7 @@ class Config:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
+    tx: TxConfig = field(default_factory=TxConfig)
     ranges: list[ScanRange] = field(default_factory=lambda: [
         ScanRange("5.8 ГГц FPV відео", 5_645e6, 5_945e6),
         ScanRange("2.4 ГГц керування / DJI / Wi-Fi", 2_400e6, 2_484e6),

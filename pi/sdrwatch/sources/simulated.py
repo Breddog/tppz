@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -195,6 +196,21 @@ class SimulatedSource(SdrSource):
 
     def set_gain(self, lna: float, vga: float, amp: bool) -> None:
         self.lna_gain, self.vga_gain, self.amp = lna, vga, amp
+
+    # Симулятор «вміє» передавати: TX нічого не випромінює, лише імітує таймінг (для демо/тестів)
+    can_transmit = True
+
+    def start_tx(self, freq_hz: float, sample_rate: float, gain_db: float, amp: bool = False) -> None:
+        self.center_hz = float(freq_hz)
+        self.sample_rate = float(min(sample_rate, self.max_sample_rate))
+        self.tx_gain = gain_db
+
+    def write_tx(self, iq: np.ndarray) -> int:
+        time.sleep(len(iq) / max(self.sample_rate, 1.0))   # імітація швидкості передачі
+        return len(iq)
+
+    def stop_tx(self) -> None:
+        pass
 
     def read(self, n: int) -> np.ndarray:
         fs = self.sample_rate

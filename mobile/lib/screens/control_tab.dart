@@ -6,6 +6,7 @@ import '../device_store.dart';
 import '../live.dart';
 import '../models.dart';
 import 'add_device_screen.dart';
+import 'transmit_screen.dart';
 import 'update_section.dart';
 
 /// Дистанційне керування модулем.
@@ -319,6 +320,25 @@ class _ControlTabState extends State<ControlTab> {
             (v) => _patch({
               'notify': {'telegram_chat_id': v},
             }),
+          ),
+
+          _h('Тест приймачів'),
+          ListTile(
+            leading: const Icon(Icons.cell_tower, color: Colors.redAccent),
+            title: const Text('Тестовий передавач'),
+            subtitle: Text(
+              (l.status['sdr'] as Map?)?['can_transmit'] == true
+                  ? 'Передати тестовий сигнал/відео на заданій частоті — перевірити приймання'
+                  : 'Потрібен HackRF (цей приймач не передає)',
+            ),
+            trailing: ((l.status['tx'] as Map?)?['active'] == true)
+                ? const Chip(
+                    label: Text('ПЕРЕДАЧА'),
+                    backgroundColor: Color(0x33FF5252),
+                    labelStyle: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+                  )
+                : const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => TransmitScreen(api: widget.api))),
           ),
 
           _h('Оновлення'),

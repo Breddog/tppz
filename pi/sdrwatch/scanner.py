@@ -97,6 +97,8 @@ class Engine:
         self.clip: ClipWriter | None = None
         self.hunts: list[Hunt] = []
         self.watch_status: dict = {}
+        self.tx: dict | None = None            # активна передача: параметри + буфер
+        self._tx_active = False
         self.stats = {"sweep_s": 0.0, "sweeps": 0, "started": time.time(), "errors": 0, "last_error": ""}
         self._stop = threading.Event()
         self._reconf = threading.Event()
@@ -139,6 +141,7 @@ class Engine:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+        self._tx_end()
         self._close_clip()
         self.src.close()
 
@@ -156,8 +159,87 @@ class Engine:
             else:
                 self._close_clip()
                 self.recording = False
+            if mode != "transmit":
+                self.tx = None       # перехід у будь-який інший режим зупиняє передачу
             self.mode = mode
         self._reconf.set()
+
+    def start_transmit(self, mode: str, freq_hz: float, gain_db: float | None = None,
+                       standard: str | None = None, image: np.ndarray | None = None,
+                       seconds: float | None = None) -> dict:
+        """Увімкнути тестовий передавач. Приймання зупиняється на час передачі."""
+        from . import transmitter as txmod
+        if not self.cfg.tx.allow:
+            raise ValueError("Передавання вимкнено в налаштуваннях модуля")
+        if not getattr(self.src, "can_transmit", False):
+            raise ValueError("Цей приймач не вміє передавати (потрібен HackRF)")
+        if mode not in txmod.MODES:
+            raise ValueError("Невідомий режим передачі")
+        fs = self.cfg.tx.sample_rate
+        gain = self.cfg.tx.default_gain_db if gain_db is None else float(gain_db)
+        std = standard or self.cfg.tx.default_standard
+        wf = txmod.build_waveform(mode, fs, image=image, standard=std, amplitude=0.9)
+        limit = self.cfg.tx.max_seconds
+        secs = limit if seconds is None else min(float(seconds), limit)
+        with self._lock:
+            self._close_clip()
+            self.recording = False
+            self.tx = {"mode": mode, "freq_hz": float(freq_hz), "gain_db": gain, "standard": std,
+                       "sample_rate": fs, "buffer": wf, "until": time.time() + secs, "seconds": secs,
+                       "started": time.time(), "has_image": image is not None}
+            self.mode = "transmit"
+        self._reconf.set()
+        return self.tx_status()
+
+    def stop_transmit(self) -> dict:
+        with self._lock:
+            self.tx = None
+            if self.mode == "transmit":
+                self.mode = "scan"
+        self._reconf.set()
+        return self.tx_status()
+
+    def tx_status(self) -> dict:
+        t = self.tx
+        if not t:
+            return {"active": False, "can_transmit": bool(getattr(self.src, "can_transmit", False)),
+                    "allowed": self.cfg.tx.allow, "max_seconds": self.cfg.tx.max_seconds}
+        import math as _m
+        return {"active": self.mode == "transmit", "mode": t["mode"], "freq_hz": round(t["freq_hz"]),
+                "gain_db": t["gain_db"], "standard": t["standard"], "seconds": t["seconds"],
+                "remaining_s": max(0, _m.ceil(t["until"] - time.time())), "has_image": t["has_image"],
+                "can_transmit": True, "allowed": self.cfg.tx.allow, "max_seconds": self.cfg.tx.max_seconds}
+
+    def _transmit_step(self) -> None:
+        t = self.tx
+        if not t:
+            self.mode = "scan"
+            return
+        if not self._tx_active:
+            self.src.start_tx(t["freq_hz"], t["sample_rate"], t["gain_db"], amp=False)
+            self._tx_active = True
+            self.hub.publish("live", {"type": "tx", **self.tx_status(), "ts": time.time()})
+        buf = t["buffer"]
+        # Передаємо буфер циклічно блоками; після кожного перевіряємо авто-стоп і запити
+        block = 65536
+        for i in range(0, len(buf), block):
+            if self._interrupted() or time.time() >= t["until"]:
+                break
+            self.src.write_tx(buf[i:i + block])
+        if time.time() >= t["until"]:
+            log.info("TX авто-стоп (%.0f с)", t["seconds"])
+            self._tx_end()
+            with self._lock:
+                self.tx = None
+                self.mode = "scan"
+            self.hub.publish("live", {"type": "tx", "active": False, "reason": "timeout", "ts": time.time()})
+
+    def _tx_end(self) -> None:
+        if self._tx_active:
+            try:
+                self.src.stop_tx()
+            finally:
+                self._tx_active = False
 
     def set_recording(self, on: bool) -> None:
         with self._lock:
@@ -234,6 +316,12 @@ class Engine:
                 self._run_calls()
                 if self._need_plan:
                     self._build_plan()
+                # Вийшли з режиму передачі — повернути приймання
+                if self._tx_active and self.mode != "transmit":
+                    self._tx_end()
+                if self.mode == "transmit":
+                    self._transmit_step()
+                    continue
                 self._apply_gain()
                 if self.mode == "paused":
                     self._stop.wait(0.5)
@@ -248,6 +336,7 @@ class Engine:
                 self._recover()
 
     def _recover(self) -> None:
+        self._tx_active = False     # після помилки TX-потік вважаємо закритим
         self._stop.wait(2.0)
         try:
             self.src.close()
@@ -651,6 +740,7 @@ class Engine:
             "mode": self.mode,
             "watch_freq_hz": self.watch_freq,
             "recording": self.recording,
+            "tx": self.tx_status(),
             "gain": {"lna": self.gain[0], "vga": self.gain[1], "amp": self.gain[2],
                      "auto": self.cfg.sdr.auto_gain},
             "video_opts": self.video_opts,

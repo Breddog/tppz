@@ -64,7 +64,12 @@ class SoapySource(SdrSource):
             pass
         self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
         self.dev.activateStream(self.stream)
-        log.info("SDR відкрито: %s", self.device_args)
+        self.tx_stream = None
+        try:
+            self.can_transmit = self.dev.getNumChannels(self._soapy.SOAPY_SDR_TX) > 0
+        except Exception:  # noqa: BLE001 — драйвер без TX (напр. RTL-SDR)
+            self.can_transmit = False
+        log.info("SDR відкрито: %s (передача: %s)", self.device_args, "є" if self.can_transmit else "немає")
 
     def close(self) -> None:
         if self.dev is not None and self.stream is not None:
@@ -102,6 +107,61 @@ class SoapySource(SdrSource):
         else:
             self.dev.setGain(self._rx, 0, float(lna + vga))
         self.lna_gain, self.vga_gain, self.amp = lna, vga, amp
+
+    # ---- передавання ---------------------------------------------------------
+    def start_tx(self, freq_hz: float, sample_rate: float, gain_db: float, amp: bool = False) -> None:
+        from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_TX
+        tx = SOAPY_SDR_TX
+        # Звільнити приймальний тракт (HackRF — напівдуплекс)
+        try:
+            self.dev.deactivateStream(self.stream)
+        except Exception:  # noqa: BLE001
+            pass
+        self.dev.setSampleRate(tx, 0, min(sample_rate, self.max_sample_rate))
+        try:
+            self.dev.setBandwidth(tx, 0, min(sample_rate, self.max_sample_rate) * 0.9)
+        except Exception:  # noqa: BLE001
+            pass
+        self.dev.setFrequency(tx, 0, float(np.clip(freq_hz, self.min_freq_hz, self.max_freq_hz)))
+        names = self.dev.listGains(tx, 0)
+        if "VGA" in names:  # HackRF: IF/VGA 0..47 дБ
+            self.dev.setGain(tx, 0, "VGA", float(np.clip(gain_db, 0, 47)))
+            if "AMP" in names:
+                self.dev.setGain(tx, 0, "AMP", 14.0 if amp else 0.0)
+        else:
+            self.dev.setGain(tx, 0, float(gain_db))
+        self.tx_stream = self.dev.setupStream(tx, SOAPY_SDR_CF32)
+        self.dev.activateStream(self.tx_stream)
+        self.center_hz = freq_hz
+        log.info("TX увімкнено: %.3f МГц, VGA %.0f дБ, AMP %s", freq_hz / 1e6, gain_db, amp)
+
+    def write_tx(self, iq: np.ndarray) -> int:
+        if self.tx_stream is None:
+            return 0
+        iq = np.ascontiguousarray(iq, dtype=np.complex64)
+        sent = 0
+        deadline = time.monotonic() + max(1.0, len(iq) / max(self.sample_rate, 1.0) * 4)
+        while sent < len(iq):
+            sr = self.dev.writeStream(self.tx_stream, [iq[sent:]], len(iq) - sent, timeoutUs=500000)
+            if sr.ret > 0:
+                sent += sr.ret
+            elif time.monotonic() > deadline:
+                break
+        return sent
+
+    def stop_tx(self) -> None:
+        if self.tx_stream is not None:
+            try:
+                self.dev.deactivateStream(self.tx_stream)
+                self.dev.closeStream(self.tx_stream)
+            except Exception:  # noqa: BLE001
+                pass
+            self.tx_stream = None
+        try:
+            self.dev.activateStream(self.stream)      # повернути приймання
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("TX вимкнено")
 
     def set_bias_tee(self, on: bool) -> None:
         """Живлення зовнішнього LNA по коаксіалу (HackRF: 3.3 В, до 50 мА)."""

@@ -107,3 +107,47 @@ def test_update_upload(client, tmp_path):
     req = json.load(open(os.path.join(upd, "request.json")))
     assert req["kind"] == "hackrf" and req["sha256"] == good and req["tag"] == "hackrf-7"
     assert open(req["file"], "rb").read() == fw
+
+
+def test_transmit(client):
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    h = {"Authorization": "Bearer secret"}
+    assert client.get("/api/tx", headers=h).json()["can_transmit"] is True
+    # carrier
+    r = client.post("/api/tx/start", json={"mode": "carrier", "freq_hz": 433.5e6, "gain_db": 5, "seconds": 30}, headers=h)
+    assert r.status_code == 200 and r.json()["active"] and r.json()["mode"] == "carrier"
+    assert client.get("/api/status", headers=h).json()["mode"] == "transmit"
+    assert client.post("/api/tx/stop", headers=h).json()["active"] is False
+    # image mode потребує завантаженої картинки
+    assert client.post("/api/tx/start", json={"mode": "image", "freq_hz": 5800e6}, headers=h).status_code == 400
+    buf = io.BytesIO()
+    Image.fromarray((np.random.rand(120, 160) * 255).astype("uint8"), "L").save(buf, "PNG")
+    up = client.post("/api/tx/image", content=buf.getvalue(), headers=h)
+    assert up.status_code == 200 and up.json()["width"] > 0
+    r = client.post("/api/tx/start", json={"mode": "image", "freq_hz": 5800e6, "standard": "NTSC", "seconds": 20}, headers=h)
+    assert r.status_code == 200 and r.json()["mode"] == "image" and r.json()["has_image"]
+    client.post("/api/tx/stop", headers=h)
+    # невідомий режим
+    assert client.post("/api/tx/start", json={"mode": "xxx", "freq_hz": 1e9}, headers=h).status_code == 400
+
+
+def test_transmit_disallowed(tmp_path):
+    cfg = Config()
+    cfg._path = str(tmp_path / "c.json")
+    cfg.api.token = "secret"
+    cfg.tx.allow = False
+    cfg.storage.path = str(tmp_path / "st")
+    st = Storage(cfg.storage.path, 50)
+    eng = Engine(cfg, SimulatedSource(), st, None, Hub())
+    eng.start()
+    try:
+        c = TestClient(create_app(AppState(cfg, eng, st, Hub(), "sdr-test")))
+        r = c.post("/api/tx/start", json={"mode": "carrier", "freq_hz": 433e6},
+                   headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 400 and "вимкнено" in r.json()["detail"]
+    finally:
+        eng.stop()
