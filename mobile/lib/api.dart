@@ -13,6 +13,11 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// Керує інший користувач (режим «тільки один»). HTTP 423.
+class ControlLockedException extends ApiException {
+  ControlLockedException(super.message);
+}
+
 /// Клієнт API одного модуля. Пробує всі адреси модуля (LAN, VPN, домен) і запам'ятовує робочу.
 class ApiClient {
   ApiClient(this.device);
@@ -21,12 +26,20 @@ class ApiClient {
   String? _base;
   static final Map<String, String> _workingBase = {};
 
+  /// Стабільний ідентифікатор цього телефону (для режиму «тільки один користувач»).
+  static String clientId = 'phone';
+  static String clientName = '';
+
   String get base => _base ?? _workingBase[device.id] ?? device.urls.first;
 
   /// Модуль сам повідомив свою адресу (оголошення UDP) — пробувати її першою.
   static void noteWorking(String deviceId, String url) => _workingBase[deviceId] = url;
 
-  Map<String, String> get _headers => {'Authorization': 'Bearer ${device.token}', 'Content-Type': 'application/json'};
+  Map<String, String> get _headers => {
+    'Authorization': 'Bearer ${device.token}',
+    'Content-Type': 'application/json',
+    'X-Client-Id': clientId,
+  };
 
   /// Знайти адресу, на якій модуль відповідає.
   Future<String> resolve({Duration timeout = const Duration(seconds: 3)}) async {
@@ -74,6 +87,7 @@ class ApiClient {
         try {
           msg = (jsonDecode(utf8.decode(r.bodyBytes)) as Map)['detail']?.toString() ?? msg;
         } catch (_) {}
+        if (r.statusCode == 423) throw ControlLockedException(msg); // керує інший користувач
         throw ApiException(msg);
       }
       return jsonDecode(utf8.decode(r.bodyBytes));

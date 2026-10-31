@@ -160,3 +160,45 @@ def test_echo_filter(client):
     assert r.status_code == 200 and r.json()["enabled"] is True
     assert client.get("/api/status", headers=h).json()["echo_filter"]["enabled"] is True
     assert client.post("/api/control/echo_filter", json={"on": False}, headers=h).json()["enabled"] is False
+
+
+def test_single_user_lock(tmp_path):
+    cfg = Config()
+    cfg._path = str(tmp_path / "c.json")
+    cfg.api.token = "secret"
+    cfg.api.multi_user = False
+    cfg.storage.path = str(tmp_path / "st")
+    st = Storage(cfg.storage.path, 50)
+    eng = Engine(cfg, SimulatedSource(), st, None, Hub())
+    eng.start()
+    try:
+        c = TestClient(create_app(AppState(cfg, eng, st, Hub(), "sdr-test")))
+
+        def h(cid):
+            return {"Authorization": "Bearer secret", "X-Client-Id": cid}
+
+        assert c.post("/api/control/claim?name=A", headers=h("a")).json()["name"] == "A"
+        assert c.post("/api/control/scan", headers=h("a")).status_code == 200
+        # інший телефон не може керувати, але бачить
+        assert c.post("/api/control/watch", json={"freq_hz": 5800e6}, headers=h("b")).status_code == 423
+        assert c.get("/api/status", headers=h("b")).status_code == 200
+        # перехоплення
+        c.post("/api/control/claim?name=B", headers=h("b"))
+        assert c.post("/api/control/scan", headers=h("b")).status_code == 200
+        assert c.post("/api/control/pause", headers=h("a")).status_code == 423
+        # багатокористувацький — обидва
+        c.post("/api/control/multi_user?on=true", headers=h("b"))
+        assert c.post("/api/control/scan", headers=h("a")).status_code == 200
+        assert c.post("/api/control/scan", headers=h("b")).status_code == 200
+    finally:
+        eng.stop()
+
+
+def test_network_and_home(client):
+    h = {"Authorization": "Bearer secret"}
+    # без NetworkManager у CI — info не падає, просто порожні/резервні дані
+    net = client.get("/api/network", headers=h).json()
+    assert "interfaces" in net and "hostname" in net
+    assert client.get("/api/control/holder", headers=h).json()["multi_user"] is True
+    home = client.get("/").text
+    assert "Мережа" in home and "addwifi" in home and "sdrdetect" in home

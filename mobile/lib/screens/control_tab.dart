@@ -6,6 +6,7 @@ import '../device_store.dart';
 import '../live.dart';
 import '../models.dart';
 import 'add_device_screen.dart';
+import 'network_section.dart';
 import 'transmit_screen.dart';
 import 'update_section.dart';
 
@@ -56,6 +57,25 @@ class _ControlTabState extends State<ControlTab> {
     try {
       await f();
       if (ok != null) _toast(ok);
+    } on ControlLockedException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message),
+          action: SnackBarAction(label: 'Перехопити', onPressed: _claimControl),
+        ),
+      );
+    } catch (e) {
+      _toast(e.toString());
+    }
+  }
+
+  Future<void> _claimControl() async {
+    try {
+      await widget.api.post(
+        '/api/control/claim?name=${Uri.encodeComponent(ApiClient.clientName.isEmpty ? "Телефон" : ApiClient.clientName)}',
+      );
+      _toast('Керування перехоплено');
     } catch (e) {
       _toast(e.toString());
     }
@@ -374,6 +394,12 @@ class _ControlTabState extends State<ControlTab> {
 
           _h('Оновлення'),
           UpdateSection(api: widget.api),
+
+          _h('Користувачі'),
+          UsersSection(api: widget.api, call: _call, onClaim: _claimControl),
+
+          _h('Мережа'),
+          NetworkSection(api: widget.api, call: _call),
 
           _h('Модуль'),
           _textTile('Назва модуля', c['name'] as String, (v) async {

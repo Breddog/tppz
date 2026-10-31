@@ -232,11 +232,16 @@ class HintsPanel extends StatelessWidget {
       case 'digital_video':
         return '$where — цифрове відео (${c!.subtype}), картинку показати неможливо$dist';
       case 'control_link':
-        return '$where — пульт керування дроном (${c!.subtype})$dist';
+        final wifiNote = s.freqHz > 2.3e9 && s.freqHz < 2.5e9 ? ' (увага: на 2.4 ГГц буває Wi-Fi/Bluetooth)' : '';
+        return '$where — пульт керування дроном (${c!.subtype})$dist$wifiNote';
       case 'telemetry':
         return '$where — телеметрія або інший вузький лінк$dist';
       case 'wifi':
-        return '$where — Wi-Fi, ймовірно не загроза';
+        return '$where — схоже на Wi-Fi (роутер/телефон), зазвичай не загроза; '
+            'але Wi-Fi буває і в цифрових FPV — зверніть увагу, чи рухається джерело';
+      case 'known_service':
+        final cell = c!.subtype.contains(RegExp('GSM|LTE|UMTS|5G'));
+        return '$where — ${cell ? 'мобільний зв\'язок (базова станція)' : 'стороння служба: ${c.subtype}'}, не дрон';
       case null:
         return '$where — сигнал аналізується…';
       default:

@@ -129,7 +129,10 @@ def classify(freq_hz: float, bw_hz: float, flatness: float, edge_db_per_mhz: flo
     # 1а. Поза FPV-діапазонами і в смузі відомої служби — фон (FM, ТБ, GSM/LTE, GNSS…)
     svc = ch.service_for(freq_hz)
     if svc is not None and not (kinds & {"video", "control"}):
-        return Classification("known_service", 0.7, svc.name, [])
+        cell = any(w in svc.name for w in ("GSM", "LTE", "UMTS", "5G"))
+        hint = ("Це базова станція мобільного зв'язку, не дрон" if cell
+                else "Це стороння служба (мовлення/навігація/зв'язок), не дрон")
+        return Classification("known_service", 0.7, svc.name, [hint])
 
     # 2. Вузькосмугові стрибкоподібні — лінки керування
     if mhz < 3.0:
@@ -145,6 +148,8 @@ def classify(freq_hz: float, bw_hz: float, flatness: float, edge_db_per_mhz: flo
             hints = ["Стрибки частоти (FHSS)" if hopping else "Пакетна передача"]
             if cv is not None and cv < 0.3:
                 hints.append("Постійна огинаюча — LoRa/FLRC/GFSK")
+            if freq_hz > 2.3e9 and not hopping:
+                hints.append("2.4 ГГц спільний з Wi-Fi/Bluetooth — переконайтесь, що це не роутер/телефон")
             return Classification("control_link", conf, sub, hints)
         if "telemetry" in kinds or "control" in kinds:
             return Classification("telemetry", 0.5, "", ["Вузька смуга в діапазоні лінків"])
@@ -160,7 +165,9 @@ def classify(freq_hz: float, bw_hz: float, flatness: float, edge_db_per_mhz: flo
     if is_ofdm:
         wifi_m = ch.match_channel(freq_hz, bw_hz, kind="wifi", tolerance_hz=3e6)
         if wifi_m and (duty < 0.7 or presence < 0.8):
-            return Classification("wifi", 0.6, wifi_m.channel.name, ["Пакетний OFDM на каналі Wi-Fi"])
+            return Classification("wifi", 0.6, wifi_m.channel.name,
+                                  [f"Схоже на Wi-Fi (канал {wifi_m.channel.name}) — роутер/телефон, зазвичай не загроза",
+                                   "Але Wi-Fi використовують і деякі цифрові FPV — дивіться, чи рухається джерело"])
         dji = ch.match_channel(freq_hz, bw_hz, kind="digital", tolerance_hz=5e6)
         if "video" in kinds or dji:
             if 8 <= mhz <= 12:

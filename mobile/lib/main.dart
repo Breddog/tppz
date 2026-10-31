@@ -1,15 +1,35 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'announcements.dart';
+import 'api.dart';
 import 'background.dart';
 import 'device_store.dart';
 import 'notifications.dart';
 import 'screens/home_screen.dart';
 
+/// Стабільний id цього телефону + його ім'я (для режиму «тільки один користувач»).
+Future<void> _initClientId() async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    var id = p.getString('client_id');
+    if (id == null) {
+      id =
+          'phone-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}-${Random().nextInt(1 << 32).toRadixString(36)}';
+      await p.setString('client_id', id);
+    }
+    ApiClient.clientId = id;
+    ApiClient.clientName = p.getString('client_name') ?? '';
+  } catch (_) {}
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Notifications.init(requestPermission: true);
+  await _initClientId();
   final store = DeviceStore();
   await store.load();
   await Announcements.start(store: store);

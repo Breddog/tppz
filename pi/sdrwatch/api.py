@@ -50,6 +50,12 @@ class EchoReq(BaseModel):
     relearn: bool = False
 
 
+class WifiReq(BaseModel):
+    ssid: str
+    password: str = ""
+    priority: int = 5
+
+
 class TxReq(BaseModel):
     mode: str                       # carrier | tone | bars | image | noise
     freq_hz: float
@@ -87,16 +93,68 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(401, "Невірний токен")
 
     last_seen = [0.0]
+    # Керування в режимі «тільки один користувач»: хто тримає керування і до коли
+    control = {"holder": None, "name": "", "until": 0.0}
+    CONTROL_TTL = 60.0
+
+    def _client_id(request: Request) -> str:
+        return request.headers.get("x-client-id") or (request.client.host if request.client else "?")
 
     def auth(request: Request, token: str | None = Query(None)) -> None:
         h = request.headers.get("authorization", "")
         check_token(h[7:] if h.lower().startswith("bearer ") else token)
         _mark_client(last_seen)
 
+    def control_holder() -> dict:
+        import time as _t
+        if control["holder"] and _t.time() > control["until"]:
+            control["holder"] = None
+        return {"multi_user": st.cfg.api.multi_user, "holder": control["holder"], "name": control["name"],
+                "viewers": st.hub.count("live")}
+
+    def require_control(request: Request, token: str | None = Query(None)) -> None:
+        """Для дій, що змінюють стан. У режимі «тільки один» — лише поточний власник керування."""
+        auth(request, token)
+        if st.cfg.api.multi_user:
+            return
+        import time as _t
+        cid = _client_id(request)
+        if control["holder"] and control["holder"] != cid and _t.time() <= control["until"]:
+            raise HTTPException(423, f"Керує інший користувач ({control['name'] or 'інший телефон'}). "
+                                     f"Перехопіть керування, щоб керувати.")
+        control["holder"] = cid
+        control["until"] = _t.time() + CONTROL_TTL
+
     # ---- без авторизації: перевірка доступності ---------------------------------
     @app.get("/api/ping")
     def ping():
         return {"app": "sdrwatch", "name": st.cfg.name, "id": st.device_id, "version": __version__}
+
+    # ---- хто керує (режим «тільки один користувач») ---------------------------------
+    @app.get("/api/control/holder", dependencies=[Depends(auth)])
+    def holder():
+        return control_holder()
+
+    @app.post("/api/control/claim", dependencies=[Depends(auth)])
+    def claim(request: Request, name: str = Query("")):
+        import time as _t
+        control["holder"] = _client_id(request)
+        control["name"] = name[:40]
+        control["until"] = _t.time() + CONTROL_TTL
+        return control_holder()
+
+    @app.post("/api/control/release", dependencies=[Depends(auth)])
+    def release(request: Request):
+        if control["holder"] == _client_id(request):
+            control["holder"] = None
+            control["name"] = ""
+        return control_holder()
+
+    @app.post("/api/control/multi_user", dependencies=[Depends(require_control)])
+    def set_multi_user(on: bool = Query(...)):
+        st.cfg.api.multi_user = bool(on)
+        st.cfg.save()
+        return control_holder()
 
     # ---- сполучення з телефоном без монітора й SSH ------------------------------------
     @app.get("/api/pair")
@@ -109,23 +167,30 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
+        import json
+
+        from . import network
         left = pairing_left()
         qr_svg, payload = "", ""
+        token_for_js = ""
         if left > 0:
-            import json
             payload = json.dumps(pairing_payload(st.cfg, request.url.hostname), ensure_ascii=False,
                                  separators=(",", ":"))
             qr_svg = _qr_svg(payload)
+            token_for_js = st.cfg.api.token
         s = st.engine.status()
-        return _HOME.format(
-            name=_esc(st.cfg.name), version=__version__, sdr=_esc(s["sdr"]["name"]), mode=s["mode"],
-            active=s["active_signals"], temp=s["cpu_temp_c"] or "—",
-            pairing=(f'<p>Сполучення відкрите ще <b>{left // 60} хв {left % 60} с</b>. У застосунку натисніть '
-                     f'«Додати модуль» → «Знайти в локальній мережі» або відскануйте QR:</p>'
-                     f'<div class="qr">{qr_svg or "<pre>" + _esc(payload) + "</pre>"}</div>')
+        pairing_html = (
+            f'<p>Сполучення відкрите ще <b>{left // 60} хв {left % 60} с</b>. У застосунку натисніть '
+            f'«Додати модуль» → «Знайти в локальній мережі» або відскануйте QR:</p>'
+            f'<div class="qr">{qr_svg or "<pre>" + _esc(payload) + "</pre>"}</div>'
             if left > 0 else
             '<p>Вікно сполучення закрите. Щоб додати телефон: вимкніть і ввімкніть живлення модуля '
             'та протягом 15 хвилин додайте його в застосунку.</p>')
+        try:
+            net = network.info(st.cfg.name)
+        except Exception as e:  # noqa: BLE001
+            net = {"hostname": st.cfg.name, "interfaces": [], "wifi": {}, "saved_wifi": [], "error": str(e)}
+        return _render_home(st.cfg, s, pairing_html, net, token_for_js)
 
     # ---- стан і сигнали -----------------------------------------------------------------
     @app.get("/api/status", dependencies=[Depends(auth)])
@@ -213,7 +278,7 @@ def create_app(app_state) -> FastAPI:
     def storage_usage():
         return st.storage.usage()
 
-    @app.post("/api/storage/clear", dependencies=[Depends(auth)])
+    @app.post("/api/storage/clear", dependencies=[Depends(require_control)])
     def storage_clear():
         st.storage.clear()
         return {"ok": True}
@@ -223,7 +288,7 @@ def create_app(app_state) -> FastAPI:
     def get_config():
         return st.cfg.to_dict()
 
-    @app.put("/api/config", dependencies=[Depends(auth)])
+    @app.put("/api/config", dependencies=[Depends(require_control)])
     async def put_config(request: Request):
         patch = await request.json()
         patch.pop("api", None)  # порт/токен міняються лише локально на Raspberry
@@ -234,7 +299,7 @@ def create_app(app_state) -> FastAPI:
             st.engine.notifier.device_name = st.cfg.name
         return st.cfg.to_dict()
 
-    @app.post("/api/ranges/toggle", dependencies=[Depends(auth)])
+    @app.post("/api/ranges/toggle", dependencies=[Depends(require_control)])
     def toggle_range(req: RangeToggle):
         if not 0 <= req.index < len(st.cfg.ranges):
             raise HTTPException(400, "Немає такого діапазону")
@@ -244,17 +309,17 @@ def create_app(app_state) -> FastAPI:
         return {"ranges": [r.__dict__ for r in st.cfg.ranges]}
 
     # ---- дистанційне керування -------------------------------------------------------------------
-    @app.post("/api/control/scan", dependencies=[Depends(auth)])
+    @app.post("/api/control/scan", dependencies=[Depends(require_control)])
     def ctl_scan():
         st.engine.set_mode("scan")
         return st.engine.status()
 
-    @app.post("/api/control/pause", dependencies=[Depends(auth)])
+    @app.post("/api/control/pause", dependencies=[Depends(require_control)])
     def ctl_pause():
         st.engine.set_mode("paused")
         return st.engine.status()
 
-    @app.post("/api/control/watch", dependencies=[Depends(auth)])
+    @app.post("/api/control/watch", dependencies=[Depends(require_control)])
     def ctl_watch(req: WatchReq):
         try:
             st.engine.set_mode("watch", req.freq_hz, req.track_id)
@@ -262,13 +327,13 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         return st.engine.status()
 
-    @app.post("/api/control/gain", dependencies=[Depends(auth)])
+    @app.post("/api/control/gain", dependencies=[Depends(require_control)])
     def ctl_gain(req: GainReq):
         st.engine.set_gain(req.lna, req.vga, req.amp, req.auto)
         st.cfg.save()
         return st.engine.status()
 
-    @app.post("/api/control/video", dependencies=[Depends(auth)])
+    @app.post("/api/control/video", dependencies=[Depends(require_control)])
     def ctl_video(req: VideoReq):
         o = st.engine.video_opts
         if req.invert_auto:
@@ -281,12 +346,12 @@ def create_app(app_state) -> FastAPI:
                 o[k] = v
         return {"video_opts": o}
 
-    @app.post("/api/control/record", dependencies=[Depends(auth)])
+    @app.post("/api/control/record", dependencies=[Depends(require_control)])
     def ctl_record(req: RecordReq):
         st.engine.set_recording(req.on)
         return {"recording": st.engine.recording}
 
-    @app.post("/api/control/echo_filter", dependencies=[Depends(auth)])
+    @app.post("/api/control/echo_filter", dependencies=[Depends(require_control)])
     def ctl_echo(req: EchoReq):
         res = st.engine.set_echo_filter(req.on, req.relearn)
         st.cfg.save()
@@ -299,7 +364,7 @@ def create_app(app_state) -> FastAPI:
     def tx_status():
         return st.engine.tx_status()
 
-    @app.post("/api/tx/image", dependencies=[Depends(auth)])
+    @app.post("/api/tx/image", dependencies=[Depends(require_control)])
     async def tx_image(request: Request):
         """Завантажити картинку для режиму відео (тіло — байти зображення)."""
         from .transmitter import load_image
@@ -311,7 +376,7 @@ def create_app(app_state) -> FastAPI:
         _tx_image["data"] = img
         return {"ok": True, "width": img.shape[1], "height": img.shape[0]}
 
-    @app.post("/api/tx/start", dependencies=[Depends(auth)])
+    @app.post("/api/tx/start", dependencies=[Depends(require_control)])
     def tx_start(req: TxReq):
         img = _tx_image["data"] if req.mode == "image" else None
         if req.mode == "image" and img is None:
@@ -321,17 +386,48 @@ def create_app(app_state) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
-    @app.post("/api/tx/stop", dependencies=[Depends(auth)])
+    @app.post("/api/tx/stop", dependencies=[Depends(require_control)])
     def tx_stop():
         return st.engine.stop_transmit()
 
-    @app.post("/api/calibrate", dependencies=[Depends(auth)])
+    @app.post("/api/calibrate", dependencies=[Depends(require_control)])
     def calibrate(req: CalibrateReq):
         cal = st.engine.calibrate(req.freq_hz, req.distance_m, req.eirp_dbm)
         st.cfg.save()
         return {"rx_cal_db": round(cal, 1)}
 
-    @app.post("/api/control/restart", dependencies=[Depends(auth)])
+    # ---- мережа (Wi-Fi / Ethernet) -----------------------------------------------------------
+    @app.get("/api/network", dependencies=[Depends(auth)])
+    def network_info():
+        from . import network
+        return network.info(st.cfg.name)
+
+    @app.get("/api/network/scan", dependencies=[Depends(auth)])
+    def network_scan():
+        from . import network
+        return {"networks": network.scan_wifi()}
+
+    @app.post("/api/network/wifi", dependencies=[Depends(require_control)])
+    def network_add_wifi(req: WifiReq):
+        from . import network
+        try:
+            return network.add_wifi(req.ssid, req.password, req.priority)
+        except PermissionError as e:
+            raise HTTPException(403, f"Немає дозволу змінювати мережу: {e}") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/network/forget", dependencies=[Depends(require_control)])
+    def network_forget(name: str = Query(...)):
+        from . import network
+        try:
+            return network.forget_wifi(name)
+        except PermissionError as e:
+            raise HTTPException(403, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/control/restart", dependencies=[Depends(require_control)])
     async def ctl_restart():
         # systemd перезапустить сервіс (Restart=always)
         asyncio.get_running_loop().call_later(0.5, os._exit, 0)
@@ -353,7 +449,7 @@ def create_app(app_state) -> FastAPI:
         except (OSError, ValueError) as e:
             raise HTTPException(503, f"Модуль не має доступу до GitHub: {e}") from e
 
-    @app.post("/api/update/upload", dependencies=[Depends(auth)])
+    @app.post("/api/update/upload", dependencies=[Depends(require_control)])
     async def update_upload(request: Request, kind: str, sha256: str, tag: str = ""):
         """Файл оновлення з телефону (тіло запиту — сам файл). Працює без інтернету на модулі."""
         data = await request.body()
@@ -363,7 +459,7 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         return updater.status()
 
-    @app.post("/api/update/fetch", dependencies=[Depends(auth)])
+    @app.post("/api/update/fetch", dependencies=[Depends(require_control)])
     def update_fetch(kind: str):
         """Модуль сам завантажує останній реліз з GitHub і встановлює."""
         try:
@@ -465,15 +561,99 @@ def _qr_svg(data: str) -> str:
     return buf.getvalue().decode().split("?>", 1)[-1]
 
 
-_HOME = """<!doctype html><html lang="uk"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{name} · SDR Watch</title>
-<style>body{{font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px;background:#0b0d12;color:#e3ecee}}
-main{{max-width:520px;margin:auto}}h1{{font-size:22px}}.qr{{background:#fff;padding:12px;border-radius:8px;
-display:inline-block}}.qr svg{{width:260px;height:260px}}dl{{display:grid;grid-template-columns:auto 1fr;gap:4px 16px}}
-dt{{color:#93a6ad}}pre{{white-space:pre-wrap;word-break:break-all;color:#111}}</style></head><body><main>
-<h1>{name}</h1><dl><dt>Версія</dt><dd>{version}</dd><dt>Приймач</dt><dd>{sdr}</dd><dt>Режим</dt><dd>{mode}</dd>
-<dt>Активних сигналів</dt><dd>{active}</dd><dt>Температура CPU</dt><dd>{temp} °C</dd></dl>
-<h2>Підключення телефону</h2>{pairing}</main></body></html>"""
+_HEAD = """<!doctype html><html lang="uk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>__TITLE__ · SDR Watch</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:20px;background:#0b0d12;color:#e3ecee}
+main{max-width:560px;margin:auto}h1{font-size:22px}h2{font-size:17px;margin-top:26px;border-top:1px solid #26363d;padding-top:16px}
+.qr{background:#fff;padding:12px;border-radius:8px;display:inline-block}.qr svg{width:240px;height:240px}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px}dt{color:#93a6ad}
+pre{white-space:pre-wrap;word-break:break-all;color:#111}code{background:#162029;padding:1px 5px;border-radius:4px}
+table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:5px 8px;border-bottom:1px solid #1c2730;font-size:14px}
+input,button{font:15px system-ui;padding:9px;border-radius:7px;border:1px solid #2a3b44;background:#101720;color:#e3ecee;margin:3px 0}
+button{background:#0e7c86;border:0;cursor:pointer;color:#fff;font-weight:600}button.d{background:#7a2a2a}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row input{flex:1;min-width:140px}.ok{color:#6cc07f}.err{color:#e06a61}
+.net{background:#121a22;border:1px solid #1c2730;border-radius:8px;padding:6px 12px;margin:6px 0}</style></head><body><main>"""
+
+
+def _render_home(cfg, status: dict, pairing_html: str, net: dict, token_js: str) -> str:
+    import json as _json
+    name = _esc(cfg.name)
+    rows = [f"<tr><td>{_esc(i['device'])}</td><td>{_esc(i['type'])}</td>"
+            f"<td>{_esc(', '.join(i['ips']) or '—')}</td><td>{_esc(i.get('connection') or '')}</td></tr>"
+            for i in net.get("interfaces", [])]
+    iface_tbl = ("<table><tr><th>Інтерфейс</th><th>Тип</th><th>IP-адреса</th><th>Мережа</th></tr>"
+                 + "".join(rows) + "</table>") if rows else "<p>Інтерфейси не визначені.</p>"
+    wifi = net.get("wifi", {}).get("connected_ssid")
+    wifi_now = (f"<p>Поточний Wi-Fi: <b>{_esc(wifi['ssid'])}</b> (сигнал {_esc(wifi.get('signal',''))}%)</p>"
+                if wifi else "<p>Wi-Fi не підключено (працює через Ethernet або точку доступу).</p>")
+    saved = "".join(
+        f'<div class="net">{_esc(w["name"])} '
+        f'<button class="d" style="float:right;padding:3px 10px" onclick="forget(\'{_esc(w["name"])}\')">забути</button></div>'
+        for w in net.get("saved_wifi", []))
+    body = f"""{_HEAD.replace("__TITLE__", name)}
+<h1>{name}</h1>
+<dl><dt>Версія</dt><dd>{__version__}</dd><dt>Приймач</dt><dd>{_esc(status['sdr']['name'])}
+{'(не підключено)' if not status.get('sdr_connected', True) else ''}</dd>
+<dt>Режим</dt><dd>{_esc(status['mode'])}</dd><dt>Активних сигналів</dt><dd>{status['active_signals']}</dd>
+<dt>Температура CPU</dt><dd>{status['cpu_temp_c'] or '—'} °C</dd>
+<dt>Хост</dt><dd>{_esc(net.get('hostname',''))}.local</dd></dl>
+
+<h2>Мережа</h2>
+{iface_tbl}
+{wifi_now}
+
+<h2>Підключення телефону</h2>
+{pairing_html}
+
+<h2>Налаштування мережі</h2>
+<p>Резервна точка доступу телефону: <code>sdrdetect</code> / <code>12345678</code>
+(якщо немає спільної мережі — увімкніть її на телефоні, модуль підключиться сам).</p>
+<div id="auth"><p>Токен доступу (з QR або застосунку):</p>
+<input id="tok" type="password" placeholder="токен" style="width:100%"></div>
+<h3 style="font-size:15px">Додати Wi-Fi</h3>
+<div class="row"><input id="ssid" placeholder="Назва мережі (SSID)">
+<input id="psk" type="password" placeholder="Пароль (порожньо — відкрита)"></div>
+<button onclick="addwifi()">Зберегти і підключитися</button>
+<button onclick="scan()" style="background:#2a3b44">Показати мережі поблизу</button>
+<div id="scan"></div>
+<h3 style="font-size:15px">Збережені мережі</h3>
+{saved or '<p>Немає збережених Wi-Fi.</p>'}
+<div id="msg"></div>
+<script>
+var TOKEN={_json.dumps(token_js)};
+if(TOKEN){{document.getElementById('tok').value=TOKEN;}}
+function tok(){{return document.getElementById('tok').value||TOKEN;}}
+function msg(t,ok){{var m=document.getElementById('msg');m.className=ok?'ok':'err';m.textContent=t;}}
+function H(){{return {{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'}};}}
+async function addwifi(){{
+ var ssid=document.getElementById('ssid').value,psk=document.getElementById('psk').value;
+ if(!ssid){{msg('Вкажіть назву мережі',false);return;}}
+ msg('Підключення…',true);
+ try{{var r=await fetch('/api/network/wifi',{{method:'POST',headers:H(),body:JSON.stringify({{ssid:ssid,password:psk}})}});
+  var j=await r.json(); if(!r.ok)throw j.detail||'помилка';
+  msg(j.connected?('Підключено до '+ssid):('Збережено: '+ssid+(j.message?' ('+j.message+')':'')),true);
+  setTimeout(function(){{location.reload();}},2500);
+ }}catch(e){{msg(''+e,false);}}
+}}
+async function forget(n){{
+ if(!confirm('Забути мережу '+n+'?'))return;
+ try{{var r=await fetch('/api/network/forget?name='+encodeURIComponent(n),{{method:'POST',headers:H()}});
+  var j=await r.json(); if(!r.ok)throw j.detail||'помилка'; location.reload();
+ }}catch(e){{msg(''+e,false);}}
+}}
+async function scan(){{
+ msg('Пошук мереж…',true);
+ try{{var r=await fetch('/api/network/scan',{{headers:H()}});var j=await r.json();
+  if(!r.ok)throw j.detail||'помилка';
+  document.getElementById('scan').innerHTML=j.networks.map(function(n){{
+   return '<div class="net" onclick="document.getElementById(\\'ssid\\').value=\\''+n.ssid.replace(/'/g,'')+'\\'" style="cursor:pointer">'
+   +n.ssid+' <span style="float:right;color:#93a6ad">'+n.signal+'% '+(n.security||'')+'</span></div>';}}).join('');
+  msg('Натисніть мережу, щоб підставити назву',true);
+ }}catch(e){{msg(''+e,false);}}
+}}
+</script>
+</main></body></html>"""
+    return body
 
 
 CLIENT_STAMP = os.path.join(os.environ.get("RUNTIME_DIRECTORY", "/run/sdrwatch"), "last_client")

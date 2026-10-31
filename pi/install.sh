@@ -24,6 +24,19 @@ fi
 echo "==> Користувач і теки"
 id sdrwatch >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -G plugdev sdrwatch
 getent group gpio >/dev/null && usermod -aG gpio sdrwatch || true
+usermod -aG netdev sdrwatch 2>/dev/null || true
+
+echo "==> Дозвіл керувати Wi-Fi/мережею з застосунку (polkit для сервісу)"
+mkdir -p /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-sdrwatch-nm.rules <<'P'
+// SDR Watch: користувач сервісу може керувати Wi-Fi через NetworkManager
+polkit.addRule(function(action, subject) {
+  if (subject.user == "sdrwatch" &&
+      action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+    return polkit.Result.YES;
+  }
+});
+P
 mkdir -p /opt/sdrwatch /etc/sdrwatch /var/lib/sdrwatch
 rm -rf /opt/sdrwatch/sdrwatch
 cp -r "$SRC/sdrwatch" /opt/sdrwatch/
