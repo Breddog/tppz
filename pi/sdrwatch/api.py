@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from . import __version__
 from . import channels as ch
 from .discovery import pairing_payload
+from .updates import Updater, UpdateError
 from .imaging import read_clip_frame
 
 
@@ -66,6 +67,7 @@ def create_app(app_state) -> FastAPI:
         return max(0, int(w - (time.monotonic() - started))) if w > 0 else 0
 
     app.state.pairing_open = lambda: pairing_left() > 0
+    updater = Updater(st.cfg.storage.path, st.cfg.updates.repo)
 
     def check_token(token: str | None) -> None:
         if not token or not hmac.compare_digest(token, st.cfg.api.token):
@@ -282,6 +284,43 @@ def create_app(app_state) -> FastAPI:
         # systemd перезапустить сервіс (Restart=always)
         asyncio.get_running_loop().call_later(0.5, os._exit, 0)
         return {"ok": True}
+
+    # ---- віддалене оновлення (ПЗ модуля, прошивка HackRF) ---------------------------------------
+    @app.get("/api/update", dependencies=[Depends(auth)])
+    def update_status():
+        sdr = st.engine.src.info()
+        return {"sdrwatch_version": __version__, "build": updater.installed_build(),
+                "hackrf_firmware": sdr.get("firmware"), "rx_only_firmware": sdr.get("rx_only_firmware"),
+                "sdr": sdr.get("name"), "status": updater.status()}
+
+    @app.get("/api/update/available", dependencies=[Depends(auth)])
+    def update_available():
+        """Модуль сам дивиться релізи на GitHub (потрібен інтернет на модулі)."""
+        try:
+            return updater.latest()
+        except (OSError, ValueError) as e:
+            raise HTTPException(503, f"Модуль не має доступу до GitHub: {e}") from e
+
+    @app.post("/api/update/upload", dependencies=[Depends(auth)])
+    async def update_upload(request: Request, kind: str, sha256: str, tag: str = ""):
+        """Файл оновлення з телефону (тіло запиту — сам файл). Працює без інтернету на модулі."""
+        data = await request.body()
+        try:
+            updater.stage(kind, data, sha256, tag)
+        except UpdateError as e:
+            raise HTTPException(400, str(e)) from e
+        return updater.status()
+
+    @app.post("/api/update/fetch", dependencies=[Depends(auth)])
+    def update_fetch(kind: str):
+        """Модуль сам завантажує останній реліз з GitHub і встановлює."""
+        try:
+            updater.fetch_and_stage(kind)
+        except UpdateError as e:
+            raise HTTPException(400, str(e)) from e
+        except OSError as e:
+            raise HTTPException(503, f"Не вдалося завантажити: {e}") from e
+        return updater.status()
 
     # ---- WebSocket: живий спектр/водоспад, сигнали, події -------------------------------------------
     @app.websocket("/ws/live")

@@ -61,9 +61,13 @@ class ApiClient {
     return u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws').toString();
   }
 
-  Future<dynamic> _send(Future<http.Response> Function() fn, {bool retry = true}) async {
+  Future<dynamic> _send(
+    Future<http.Response> Function() fn, {
+    bool retry = true,
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
     try {
-      final r = await fn().timeout(const Duration(seconds: 12));
+      final r = await fn().timeout(timeout);
       if (r.statusCode == 401) throw ApiException('Невірний токен доступу');
       if (r.statusCode >= 400) {
         String msg = 'Помилка ${r.statusCode}';
@@ -76,13 +80,13 @@ class ApiClient {
     } on SocketException {
       if (retry) {
         await resolve();
-        return _send(fn, retry: false);
+        return _send(fn, retry: false, timeout: timeout);
       }
       throw ApiException('Немає зв\'язку з модулем');
     } on TimeoutException {
       if (retry) {
         await resolve();
-        return _send(fn, retry: false);
+        return _send(fn, retry: false, timeout: timeout);
       }
       throw ApiException('Модуль не відповідає');
     }
@@ -92,6 +96,12 @@ class ApiClient {
 
   Future<dynamic> post(String path, [Map<String, dynamic>? body]) =>
       _send(() => http.post(uri(path), headers: _headers, body: jsonEncode(body ?? {})));
+
+  /// Надіслати файл (тіло запиту — самі байти), напр. оновлення прошивки.
+  Future<dynamic> upload(String path, Map<String, dynamic> q, List<int> bytes) => _send(
+    () => http.post(uri(path, q), headers: {..._headers, 'Content-Type': 'application/octet-stream'}, body: bytes),
+    timeout: const Duration(minutes: 3),
+  );
 
   Future<dynamic> put(String path, Map<String, dynamic> body) =>
       _send(() => http.put(uri(path), headers: _headers, body: jsonEncode(body)));

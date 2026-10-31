@@ -31,13 +31,17 @@ jobs:
           cp -r pi/sdrwatch pi/systemd pi/image pi/install.sh pi/requirements.txt pi/config.example.json sdrwatch-pi/
           cp docs/INSTALL_PI.md sdrwatch-pi/ 2>/dev/null || true
           rm -rf sdrwatch-pi/image/stage-sdrwatch
+          echo "pi-${{ github.run_number }}" > sdrwatch-pi/BUILD
           tar czf dist/sdrwatch-pi.tar.gz sdrwatch-pi
+          (cd dist && sha256sum sdrwatch-pi.tar.gz > sdrwatch-pi.tar.gz.sha256)
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: pi-${{ github.run_number }}
           name: Прошивка Raspberry Pi (збірка ${{ github.run_number }})
           prerelease: true
-          files: dist/sdrwatch-pi.tar.gz
+          files: |
+            dist/sdrwatch-pi.tar.gz
+            dist/sdrwatch-pi.tar.gz.sha256
           body: |
             **sdrwatch-pi-image.img.xz** — готовий образ SD-карти (Raspberry Pi OS Lite 64-bit + SDR Watch).
             Запишіть його Raspberry Pi Imager або balenaEtcher, відредагуйте `sdrwatch.txt` на розділі `bootfs`
@@ -62,6 +66,7 @@ jobs:
           mkdir -p $F
           cp -r pi/sdrwatch pi/systemd pi/image pi/install.sh pi/requirements.txt $F/
           rm -rf $F/image/stage-sdrwatch
+          echo "pi-${{ github.run_number }}" > $F/BUILD
           PW=$(openssl rand -hex 16)
           echo "::add-mask::$PW"
           echo "PW=$PW" >> $GITHUB_ENV

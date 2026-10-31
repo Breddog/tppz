@@ -109,6 +109,12 @@ class ApiConfig:
 
 
 @dataclass
+class UpdateConfig:
+    # Репозиторій GitHub, звідки модуль сам бере оновлення (релізи pi-N і hackrf-N)
+    repo: str = "Breddog/tppz"
+
+
+@dataclass
 class Config:
     name: str = "SDR-модуль"
     latitude: float | None = None
@@ -120,6 +126,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    updates: UpdateConfig = field(default_factory=UpdateConfig)
     ranges: list[ScanRange] = field(default_factory=lambda: [
         ScanRange("5.8 ГГц FPV відео", 5_645e6, 5_945e6),
         ScanRange("2.4 ГГц керування / DJI / Wi-Fi", 2_400e6, 2_484e6),

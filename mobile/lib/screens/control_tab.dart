@@ -6,6 +6,7 @@ import '../device_store.dart';
 import '../live.dart';
 import '../models.dart';
 import 'add_device_screen.dart';
+import 'update_section.dart';
 
 /// Дистанційне керування модулем.
 class ControlTab extends StatefulWidget {
@@ -319,6 +320,9 @@ class _ControlTabState extends State<ControlTab> {
               'notify': {'telegram_chat_id': v},
             }),
           ),
+
+          _h('Оновлення'),
+          UpdateSection(api: widget.api),
 
           _h('Модуль'),
           _textTile('Назва модуля', c['name'] as String, (v) async {

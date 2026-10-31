@@ -1,0 +1,7 @@
+[Unit]
+Description=SDR Watch — встановлення оновлення (ПЗ модуля або прошивка HackRF)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sdrwatch-update
+TimeoutStartSec=900

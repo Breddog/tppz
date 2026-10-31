@@ -10,11 +10,16 @@ IMAGE=0
 
 echo "==> Системні пакети (SoapySDR + драйвери HackRF / RTL-SDR / Airspy)"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends python3-venv python3-dev python3-numpy python3-pil \
-    python3-soapysdr soapysdr-tools soapysdr-module-hackrf soapysdr-module-rtlsdr soapysdr-module-airspy \
-    hackrf rtl-sdr network-manager ca-certificates
-apt-get install -y --no-install-recommends python3-lgpio python3-gpiozero || true
+PKGS="python3-venv python3-dev python3-numpy python3-pil python3-soapysdr soapysdr-tools soapysdr-module-hackrf
+      soapysdr-module-rtlsdr soapysdr-module-airspy hackrf rtl-sdr network-manager ca-certificates"
+# Оновлення з телефону може прийти, коли в модуля немає інтернету — тоді apt не потрібен
+if dpkg -s $PKGS >/dev/null 2>&1; then
+  echo "    усі пакети вже встановлено"
+else
+  apt-get update
+  apt-get install -y --no-install-recommends $PKGS
+  apt-get install -y --no-install-recommends python3-lgpio python3-gpiozero || true
+fi
 
 echo "==> Користувач і теки"
 id sdrwatch >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -G plugdev sdrwatch
@@ -25,12 +30,20 @@ cp -r "$SRC/sdrwatch" /opt/sdrwatch/
 cp "$SRC/requirements.txt" /opt/sdrwatch/
 install -m 755 "$SRC/image/sdrwatch-firstboot.sh" /usr/local/sbin/sdrwatch-firstboot
 install -m 755 "$SRC/image/sdrwatch-netwatch.sh" /usr/local/sbin/sdrwatch-netwatch
+install -m 755 "$SRC/image/sdrwatch-update.sh" /usr/local/sbin/sdrwatch-update
+[ -f "$SRC/BUILD" ] && install -m 644 "$SRC/BUILD" /opt/sdrwatch/BUILD
+mkdir -p /var/lib/sdrwatch/update
 chown -R sdrwatch:plugdev /var/lib/sdrwatch /etc/sdrwatch
 
 echo "==> Python-оточення (з доступом до системного SoapySDR і numpy)"
 [ -x /opt/sdrwatch/venv/bin/python ] || python3 -m venv --system-site-packages /opt/sdrwatch/venv
-/opt/sdrwatch/venv/bin/pip install -q --upgrade pip
-/opt/sdrwatch/venv/bin/pip install -q -r /opt/sdrwatch/requirements.txt
+if ! { /opt/sdrwatch/venv/bin/pip install -q --upgrade pip && \
+       /opt/sdrwatch/venv/bin/pip install -q -r /opt/sdrwatch/requirements.txt; }; then
+  # Без інтернету: продовжуємо, якщо потрібні модулі вже є
+  /opt/sdrwatch/venv/bin/python -c "import fastapi, uvicorn, numpy" \
+    && echo "    pip недоступний, використовую вже встановлені бібліотеки" \
+    || { echo "Немає інтернету й бібліотек Python — підключіть модуль до інтернету"; exit 1; }
+fi
 cat > /usr/local/bin/sdrwatch <<'B'
 #!/bin/sh
 exec sudo -u sdrwatch SDRWATCH_CONFIG=/etc/sdrwatch/config.json /opt/sdrwatch/venv/bin/python -m sdrwatch "$@"
@@ -85,12 +98,16 @@ echo "==> Сервіси"
 install -m 644 "$SRC/systemd/sdrwatch.service" /etc/systemd/system/sdrwatch.service
 install -m 644 "$SRC/image/sdrwatch-firstboot.service" /etc/systemd/system/sdrwatch-firstboot.service
 install -m 644 "$SRC/image/sdrwatch-netwatch.service" /etc/systemd/system/sdrwatch-netwatch.service
-systemctl enable sdrwatch.service sdrwatch-firstboot.service sdrwatch-netwatch.service
+install -m 644 "$SRC/image/sdrwatch-update.service" /etc/systemd/system/sdrwatch-update.service
+install -m 644 "$SRC/image/sdrwatch-update.path" /etc/systemd/system/sdrwatch-update.path
+chown -R sdrwatch:plugdev /var/lib/sdrwatch
+systemctl enable sdrwatch.service sdrwatch-firstboot.service sdrwatch-netwatch.service sdrwatch-update.path
 
 if [ "$IMAGE" = 0 ]; then
   udevadm control --reload-rules && udevadm trigger || true
   systemctl daemon-reload
   systemctl restart sdrwatch sdrwatch-netwatch
+  systemctl start sdrwatch-update.path
   sleep 4
   sdrwatch pair || true
   IP=$(hostname -I | awk '{print $1}')

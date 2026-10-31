@@ -1,0 +1,9 @@
+[Unit]
+Description=SDR Watch — очікування запиту на оновлення
+
+[Path]
+PathExists=/var/lib/sdrwatch/update/request.json
+Unit=sdrwatch-update.service
+
+[Install]
+WantedBy=multi-user.target

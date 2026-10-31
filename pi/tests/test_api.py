@@ -85,3 +85,25 @@ def test_announcer_payload(monkeypatch):
     assert dsts == {"255.255.255.255", "192.168.43.1"}      # broadcast + телефон-шлюз
     assert all(addr[1] == discovery.ANNOUNCE_PORT for _, addr in sent)
     assert sent[0][0] == {"app": "sdrwatch", "name": "Пост-1", "id": "sdr-x", "port": 8080, "pairing": True}
+
+
+def test_update_upload(client, tmp_path):
+    import hashlib
+    import json
+    import os
+
+    h = {"Authorization": "Bearer secret"}
+    fw = (0x10089000).to_bytes(4, "little") + b"\x00" * 40000 + b"2026.01.3-sdrwatch-rx"
+    good = hashlib.sha256(fw).hexdigest()
+    r = client.post("/api/update/upload?kind=hackrf&sha256=" + "0" * 64, content=fw, headers=h)
+    assert r.status_code == 400 and "Контрольна сума" in r.json()["detail"]
+    r = client.post("/api/update/upload?kind=hackrf&sha256=x", content=b"junk", headers=h)
+    assert r.status_code == 400
+    r = client.post(f"/api/update/upload?kind=hackrf&sha256={good}&tag=hackrf-7", content=fw, headers=h)
+    assert r.status_code == 200 and r.json()["state"] == "queued"
+    st = client.get("/api/update", headers=h).json()
+    assert st["status"]["state"] == "queued" and "hackrf_firmware" in st
+    upd = os.path.join(str(tmp_path / "st"), "update")
+    req = json.load(open(os.path.join(upd, "request.json")))
+    assert req["kind"] == "hackrf" and req["sha256"] == good and req["tag"] == "hackrf-7"
+    assert open(req["file"], "rb").read() == fw

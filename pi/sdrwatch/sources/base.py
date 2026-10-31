@@ -21,6 +21,8 @@ class SdrSource(abc.ABC):
         self.lna_gain: float = 0.0
         self.vga_gain: float = 0.0
         self.amp: bool = False
+        self.firmware: str | None = None
+        self.hw_info: dict = {}
 
     @property
     def total_gain_db(self) -> float:
@@ -51,4 +53,6 @@ class SdrSource(abc.ABC):
             "min_freq_hz": self.min_freq_hz,
             "max_freq_hz": self.max_freq_hz,
             "max_sample_rate": self.max_sample_rate,
+            "firmware": self.firmware,
+            "rx_only_firmware": bool(self.firmware and "sdrwatch" in self.firmware),
         }

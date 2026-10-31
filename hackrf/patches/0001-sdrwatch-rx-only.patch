@@ -1,0 +1,37 @@
+diff --git a/firmware/hackrf-common.cmake b/firmware/hackrf-common.cmake
+index fed1d66..448ee5d 100644
+--- a/firmware/hackrf-common.cmake
++++ b/firmware/hackrf-common.cmake
+@@ -85,6 +85,9 @@ if(NOT DEFINED SRC_M0)
+ endif()
+ 
+ SET(HACKRF_OPTS "-D${BOARD} -DLPC43XX -D${MCU_PARTNO} -DTX_ENABLE -D'VERSION_STRING=\"${VERSION}\"'")
++if(SDRWATCH_RX_ONLY)
++	SET(HACKRF_OPTS "${HACKRF_OPTS} -DSDRWATCH_RX_ONLY")
++endif()
+ 
+ SET(LDSCRIPT_M4 "-T${PATH_HACKRF_FIRMWARE_COMMON}/${MCU_PARTNO}_M4_memory.ld -Tlibopencm3_lpc43xx_rom_to_ram.ld -T${PATH_HACKRF_FIRMWARE_COMMON}/LPC43xx_M4_M0_image_from_text.ld -T${PATH_HACKRF_FIRMWARE_COMMON}/LPC43xx_M4_memory_rom_only.ld")
+ 
+diff --git a/firmware/hackrf_usb/usb_api_transceiver.c b/firmware/hackrf_usb/usb_api_transceiver.c
+index cbc8e29..d7e07e7 100644
+--- a/firmware/hackrf_usb/usb_api_transceiver.c
++++ b/firmware/hackrf_usb/usb_api_transceiver.c
+@@ -385,9 +385,17 @@ usb_request_status_t usb_vendor_request_set_transceiver_mode(
+ {
+ 	if (stage == USB_TRANSFER_STAGE_SETUP) {
+ 		switch (endpoint->setup.value) {
++#ifdef SDRWATCH_RX_ONLY
++		/* SDR Watch: прошивка лише для приймання. Передавач ніколи не вмикається,
++		 * тож модуль виявлення не може випромінювати навіть через помилку ПЗ. */
++		case TRANSCEIVER_MODE_TX:
++		case TRANSCEIVER_MODE_SS:
++			return USB_REQUEST_STATUS_STALL;
++#else
++		case TRANSCEIVER_MODE_TX:
++#endif
+ 		case TRANSCEIVER_MODE_OFF:
+ 		case TRANSCEIVER_MODE_RX:
+-		case TRANSCEIVER_MODE_TX:
+ 		case TRANSCEIVER_MODE_RX_SWEEP:
+ 		case TRANSCEIVER_MODE_CPLD_UPDATE:
+ 			request_transceiver_mode(endpoint->setup.value);

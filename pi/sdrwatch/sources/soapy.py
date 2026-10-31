@@ -55,6 +55,13 @@ class SoapySource(SdrSource):
                 self.dev.setFrequencyCorrection(SOAPY_SDR_RX, 0, self.ppm)
             except Exception:  # noqa: BLE001
                 log.warning("Корекція ppm не підтримується драйвером")
+        try:
+            hw = dict(self.dev.getHardwareInfo())
+            # SoapyHackRF: "version" — рядок версії прошивки, "part_id"/"serial" — плата
+            self.firmware = hw.get("version") or hw.get("firmware") or hw.get("fw_version")
+            self.hw_info = {k: str(v) for k, v in hw.items()}
+        except Exception:  # noqa: BLE001
+            pass
         self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
         self.dev.activateStream(self.stream)
         log.info("SDR відкрито: %s", self.device_args)
