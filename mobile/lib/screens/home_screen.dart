@@ -182,7 +182,20 @@ class _DeviceCardState extends State<DeviceCard> {
                     style: TextStyle(color: online ? Colors.white60 : Colors.redAccent, fontSize: 12),
                   ),
                   const Spacer(),
-                  if (online && top.isEmpty)
+                  if (online && status!['sdr_connected'] == false)
+                    const Row(
+                      children: [
+                        Icon(Icons.usb_off, color: Colors.orangeAccent, size: 18),
+                        SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'SDR не підключено — перевірте HackRF',
+                            style: TextStyle(color: Colors.orangeAccent, fontSize: 12.5),
+                          ),
+                        ),
+                      ],
+                    )
+                  else if (online && top.isEmpty)
                     const Row(
                       children: [
                         Icon(Icons.verified_outlined, color: Colors.greenAccent, size: 18),

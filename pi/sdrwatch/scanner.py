@@ -99,6 +99,8 @@ class Engine:
         self.watch_status: dict = {}
         self.tx: dict | None = None            # активна передача: параметри + буфер
         self._tx_active = False
+        self._opened = False                   # чи відкрито приймач (HackRF може бути відсутній)
+        self._next_open = 0.0
         self.stats = {"sweep_s": 0.0, "sweeps": 0, "started": time.time(), "errors": 0, "last_error": ""}
         self._stop = threading.Event()
         self._reconf = threading.Event()
@@ -130,12 +132,29 @@ class Engine:
 
     # ---- керування -------------------------------------------------------------
     def start(self) -> None:
-        self.src.open()
-        self.src.set_sample_rate(self.cfg.sdr.sample_rate)
-        self._apply_gain()
-        self._build_plan()
+        # SDR відкриваємо «м'яко»: якщо приймача ще немає (не підключений HackRF),
+        # сервіс усе одно стартує, а підключення повторюється у фоні. Так веб-сервер
+        # і застосунок працюють навіть без приймача (показують «SDR не підключено»).
+        self._opened = self._try_open()
         self._thread = threading.Thread(target=self._run, daemon=True, name="engine")
         self._thread.start()
+
+    def _try_open(self) -> bool:
+        try:
+            self.src.open()
+            self.src.set_sample_rate(self.cfg.sdr.sample_rate)
+            self._apply_gain()
+            self._build_plan()
+            self.stats["last_error"] = ""
+            return True
+        except Exception as e:  # noqa: BLE001 — приймача може не бути або він зайнятий
+            self.stats["last_error"] = f"SDR недоступний: {e}"
+            log.warning("SDR не відкрито (%s) — працюю без приймача, повторю згодом", e)
+            try:
+                self.src.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -314,6 +333,17 @@ class Engine:
             try:
                 self._reconf.clear()
                 self._run_calls()
+                # Приймача немає — тримаємо сервіс живим і періодично пробуємо відкрити SDR
+                if not self._opened:
+                    if time.time() >= self._next_open:
+                        self._opened = self._try_open()
+                        if self._opened:
+                            log.info("SDR підключено — починаю сканування")
+                        else:
+                            self._next_open = time.time() + 3.0   # наступна спроба через 3 с
+                    if not self._opened:
+                        self._stop.wait(1.0)
+                        continue
                 if self._need_plan:
                     self._build_plan()
                 # Вийшли з режиму передачі — повернути приймання
@@ -336,15 +366,15 @@ class Engine:
                 self._recover()
 
     def _recover(self) -> None:
-        self._tx_active = False     # після помилки TX-потік вважаємо закритим
-        self._stop.wait(2.0)
+        # Приймач «відвалився» (USB) — позначаємо закритим; цикл сам перевідкриє його через _try_open
+        self._tx_active = False
+        self._opened = False
+        self._next_open = time.time() + 2.0
         try:
             self.src.close()
-            self.src.open()
-            self.src.set_sample_rate(self.cfg.sdr.sample_rate)
-            self._apply_gain()
         except Exception:  # noqa: BLE001
-            log.exception("Не вдалося перевідкрити SDR")
+            pass
+        self._stop.wait(2.0)
 
     def _apply_gain(self) -> None:
         lna, vga, amp = self.gain
@@ -738,6 +768,7 @@ class Engine:
     def status(self) -> dict:
         return {
             "mode": self.mode,
+            "sdr_connected": self._opened,
             "watch_freq_hz": self.watch_freq,
             "recording": self.recording,
             "tx": self.tx_status(),
