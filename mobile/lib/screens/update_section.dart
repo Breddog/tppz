@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import '../api.dart';
+import '../netbind.dart';
 
 /// Репозиторій з релізами pi-N (ПЗ модуля) і hackrf-N (прошивка HackRF).
 const kUpdateRepo = 'Breddog/tppz';
@@ -66,12 +67,14 @@ class _UpdateSectionState extends State<UpdateSection> {
     });
     final out = <String, _Release>{};
     try {
-      final r = await http
-          .get(
-            Uri.parse('https://api.github.com/repos/$kUpdateRepo/releases?per_page=30'),
-            headers: {'Accept': 'application/vnd.github+json'},
-          )
-          .timeout(const Duration(seconds: 15));
+      final r = await NetBind.forInternet(
+        () => http
+            .get(
+              Uri.parse('https://api.github.com/repos/$kUpdateRepo/releases?per_page=30'),
+              headers: {'Accept': 'application/vnd.github+json'},
+            )
+            .timeout(const Duration(seconds: 15)),
+      );
       for (final rel in (jsonDecode(r.body) as List).cast<Map<String, dynamic>>()) {
         final tag = rel['tag_name'] as String;
         final assets = {
@@ -131,10 +134,10 @@ class _UpdateSectionState extends State<UpdateSection> {
     });
     try {
       // 1) Телефон завантажує файл і передає модулю — працює, навіть коли в модуля немає інтернету
-      final file = await http.get(Uri.parse(rel.url)).timeout(const Duration(minutes: 2));
+      final file = await NetBind.forInternet(() => http.get(Uri.parse(rel.url)).timeout(const Duration(minutes: 2)));
       final shaFile = rel.shaUrl == null
           ? null
-          : await http.get(Uri.parse(rel.shaUrl!)).timeout(const Duration(seconds: 30));
+          : await NetBind.forInternet(() => http.get(Uri.parse(rel.shaUrl!)).timeout(const Duration(seconds: 30)));
       if (file.statusCode != 200 || shaFile == null || shaFile.statusCode != 200) {
         throw Exception('файл недоступний');
       }

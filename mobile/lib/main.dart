@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'announcements.dart';
 import 'api.dart';
+import 'netbind.dart';
 import 'background.dart';
 import 'device_store.dart';
 import 'notifications.dart';
@@ -30,6 +31,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Notifications.init(requestPermission: true);
   await _initClientId();
+  await NetBind.wifi(); // Wi-Fi без інтернету (модуль/точка доступу) — запити до модуля йдуть через Wi-Fi
   final store = DeviceStore();
   await store.load();
   await Announcements.start(store: store);

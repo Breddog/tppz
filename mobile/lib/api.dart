@@ -5,9 +5,17 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'netbind.dart';
 
 /// Номер збірки APK (задається в CI: --dart-define=APP_BUILD=N).
 const appBuild = String.fromEnvironment('APP_BUILD', defaultValue: 'dev');
+
+String _short(Object e) {
+  if (e is TimeoutException) return 'немає відповіді (тайм-аут)';
+  if (e is SocketException) return 'немає з\'єднання (${e.osError?.message ?? e.message})';
+  final s = e.toString();
+  return s.length > 80 ? s.substring(0, 80) : s;
+}
 
 class ApiException implements Exception {
   ApiException(this.message);
@@ -45,8 +53,9 @@ class ApiClient {
   };
 
   /// Знайти адресу, на якій модуль відповідає.
-  Future<String> resolve({Duration timeout = const Duration(seconds: 3)}) async {
+  Future<String> resolve({Duration timeout = const Duration(seconds: 5)}) async {
     _base = null;
+    final errors = <String>[];
     final candidates = [
       if (_workingBase[device.id] != null) _workingBase[device.id]!,
       ...device.urls.where((u) => u != _workingBase[device.id]),
@@ -59,9 +68,14 @@ class ApiClient {
           _workingBase[device.id] = u;
           return u;
         }
-      } catch (_) {}
+        errors.add('$u → HTTP ${r.statusCode}');
+      } catch (e) {
+        errors.add('$u → ${_short(e)}');
+      }
     }
-    throw ApiException('Модуль недоступний');
+    // Можливо, телефон шле запити через мобільний інтернет — прив'язатися до Wi-Fi й спробувати ще раз
+    if (!NetBind.bound && await NetBind.wifi()) return resolve(timeout: timeout);
+    throw ApiException('Модуль недоступний:\n${errors.join('\n')}');
   }
 
   Uri uri(String path, [Map<String, dynamic>? q]) {

@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 
 import '../announcements.dart';
 import '../api.dart';
+import '../netbind.dart';
 import '../device_store.dart';
 import '../models.dart';
 import '../widgets/hotspot_help.dart';
@@ -134,6 +135,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
   }
 
   Future<void> _save() async {
+    await NetBind.wifi(); // Wi-Fi без інтернету — інакше Android шле запити в мобільну мережу
     final urls = _urls.text
         .split(RegExp(r'[\s,]+'))
         .where((u) => u.isNotEmpty)
@@ -157,17 +159,40 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
       // Перевірка: модуль відповідає і токен правильний
       String? id = _id;
       String name = _name.text.trim();
-      for (final u in urls) {
-        try {
-          final r = await http.get(Uri.parse('$u/api/ping')).timeout(const Duration(seconds: 4));
-          final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-          id ??= j['id'] as String;
-          if (name.isEmpty) name = j['name'] as String;
-          break;
-        } catch (_) {}
+      String? ok;
+      final errors = <String>[];
+      Future<void> tryAll() async {
+        for (final u in urls) {
+          try {
+            final r = await http.get(Uri.parse('$u/api/ping')).timeout(const Duration(seconds: 6));
+            final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+            id ??= j['id'] as String;
+            if (name.isEmpty) name = j['name'] as String;
+            ok = u;
+            return;
+          } catch (e) {
+            errors.add('$u → ${e is TimeoutException ? 'немає відповіді' : e.toString().split('\n').first}');
+          }
+        }
       }
-      if (id == null) throw ApiException('Модуль не відповідає за жодною з адрес');
-      final d = Device(id: id, name: name.isEmpty ? 'SDR-модуль' : name, urls: urls, token: _token.text.trim());
+
+      await tryAll();
+      // Wi-Fi без інтернету: Android міг слати запити в мобільну мережу — прив'язуємось до Wi-Fi й ще раз
+      if (ok == null && !NetBind.bound && await NetBind.wifi()) {
+        errors.clear();
+        await tryAll();
+      }
+      if (ok == null) {
+        throw ApiException(
+          'Модуль не відповідає:\n${errors.join('\n')}\n\n'
+          'Перевірте: телефон і модуль в одній мережі; відкрийте в браузері телефона ${urls.first} — '
+          'якщо сторінка не відкривається, вимкніть на телефоні мобільні дані й спробуйте ще раз.',
+        );
+      }
+      urls.remove(ok);
+      urls.insert(0, ok!); // адреса, що відповіла, — першою
+      if (id == null) throw ApiException('Модуль не повідомив свій id');
+      final d = Device(id: id!, name: name.isEmpty ? 'SDR-модуль' : name, urls: urls, token: _token.text.trim());
       if (widget.existing != null) {
         d.notify = widget.existing!.notify;
         d.minPriority = widget.existing!.minPriority;
