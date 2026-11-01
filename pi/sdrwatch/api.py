@@ -60,6 +60,9 @@ class AudioReq(BaseModel):
     scan_start_hz: float | None = None   # автоскан: діапазон і крок сітки
     scan_stop_hz: float | None = None
     scan_step_hz: float = 12.5e3
+    scan_freqs: list[float] | None = None   # сканування збережених частот (пам'ять)
+    hold_s: float = 2.0                     # затримка після кінця передачі, с
+    lockout: list[float] | None = None      # заблоковані (пропущені) частоти
 
 
 class AudioParams(BaseModel):
@@ -430,8 +433,11 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/audio/start", dependencies=[Depends(require_control)])
     def audio_start(req: AudioReq):
         scan = None
-        if req.scan_start_hz and req.scan_stop_hz:
-            scan = {"start_hz": req.scan_start_hz, "stop_hz": req.scan_stop_hz, "step_hz": req.scan_step_hz}
+        if req.scan_freqs:
+            scan = {"freqs": req.scan_freqs, "hold_s": req.hold_s, "lockout": req.lockout}
+        elif req.scan_start_hz and req.scan_stop_hz:
+            scan = {"start_hz": req.scan_start_hz, "stop_hz": req.scan_stop_hz, "step_hz": req.scan_step_hz,
+                    "hold_s": req.hold_s, "lockout": req.lockout}
         try:
             return st.engine.start_audio(req.freq_hz, req.mod, req.squelch_db, scan)
         except ValueError as e:
@@ -440,6 +446,15 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/audio/params", dependencies=[Depends(require_control)])
     def audio_params(req: AudioParams):
         return st.engine.set_audio_params(req.squelch_db, req.mod, req.freq_hz)
+
+    @app.post("/api/audio/skip", dependencies=[Depends(require_control)])
+    def audio_skip():
+        """Пропустити поточну частоту (блокування) і шукати далі."""
+        return st.engine.audio_skip()
+
+    @app.post("/api/audio/resume", dependencies=[Depends(require_control)])
+    def audio_resume(unlock: float | None = Query(None)):
+        return st.engine.audio_resume(unlock)
 
     @app.post("/api/audio/stop", dependencies=[Depends(require_control)])
     def audio_stop():

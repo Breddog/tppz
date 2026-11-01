@@ -102,9 +102,22 @@ class PhoneAudioDemod {
   /// Гучність (множник), 0.2..4.
   double volume = 1.0;
 
+  // Фільтр каналу (до демодуляції): модуль лише грубо проріджує, точну смугу вирізає телефон
+  _FirDecim? _chI, _chQ;
+
+  /// Смуга каналу (половина), Гц: ЧМ вузька 8 кГц (крок 12.5/25 кГц), АМ 5 кГц, ЧМ широка 100 кГц.
+  static double channelHalf(String mode) => switch (mode) {
+    'wfm' => 100e3,
+    'am' => 5e3,
+    _ => 8e3,
+  };
+
   void _setup(String mode, double rate) {
     _mode = mode;
     _rate = rate;
+    final ch = _lowpass(channelHalf(mode) / rate, mode == 'wfm' ? 31 : 63);
+    _chI = _FirDecim(ch, 1);
+    _chQ = _FirDecim(Float32List.fromList(ch), 1);
     final decim = (rate / outRate).round().clamp(1, 20);
     final cutoff = mode == 'wfm' ? 15e3 : 4e3;
     _f = _FirDecim(_lowpass(cutoff / rate, mode == 'wfm' ? 63 : 31), decim);
@@ -116,8 +129,19 @@ class PhoneAudioDemod {
   /// Пакет → PCM int16 LE (24 кГц). Якщо шумодав закритий — тиша (порожньо).
   Int16List process(AudioIqPacket p, {bool squelchOpen = true}) {
     if (p.mode != _mode || p.rate != _rate) _setup(p.mode, p.rate);
-    final iq = p.iq;
-    final n = iq.length ~/ 2;
+    final raw = p.iq;
+    final n = raw.length ~/ 2;
+    final ii = Float32List(n), qq = Float32List(n);
+    for (var k = 0; k < n; k++) {
+      ii[k] = raw[2 * k];
+      qq[k] = raw[2 * k + 1];
+    }
+    final fi = _chI!.process(ii), fq = _chQ!.process(qq);
+    final iq = Float32List(n * 2);
+    for (var k = 0; k < n; k++) {
+      iq[2 * k] = fi[k];
+      iq[2 * k + 1] = fq[k];
+    }
     final a = Float32List(n);
     if (p.mode == 'am') {
       var mean = 0.0;

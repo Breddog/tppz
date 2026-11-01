@@ -62,7 +62,18 @@ class SoapySource(SdrSource):
             self.hw_info = {k: str(v) for k, v in hw.items()}
         except Exception:  # noqa: BLE001
             pass
-        self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+        # Рідний формат HackRF — CS8 (8-біт I/Q). Читаємо його напряму: у 4 рази менше даних через
+        # драйвер і пам'ять, ніж CF32 (float), а в float перетворюємо лише те, що прочитали.
+        self._cs8 = False
+        try:
+            native, _scale = self.dev.getNativeStreamFormat(SOAPY_SDR_RX, 0)
+            if native == "CS8" and getattr(self, "stream_format", "auto") in ("auto", "CS8"):
+                self.stream = self.dev.setupStream(SOAPY_SDR_RX, "CS8")
+                self._cs8 = True
+        except Exception:  # noqa: BLE001 — старий драйвер: звичайний CF32
+            self._cs8 = False
+        if not self._cs8:
+            self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
         self.dev.activateStream(self.stream)
         self.tx_stream = None
         try:
@@ -177,6 +188,8 @@ class SoapySource(SdrSource):
             self.read(int(self.sample_rate * ms / 1000), timeout_us=20000)
 
     def read(self, n: int, timeout_us: int = 500000) -> np.ndarray:
+        if getattr(self, "_cs8", False):
+            return self._read_cs8(n, timeout_us)
         out = np.empty(n, dtype=np.complex64)
         got = 0
         deadline = time.monotonic() + max(1.0, n / max(self.sample_rate, 1.0) * 4)
@@ -189,3 +202,18 @@ class SoapySource(SdrSource):
             elif time.monotonic() > deadline:
                 break
         return out[:got] if got < n else out
+
+    def _read_cs8(self, n: int, timeout_us: int) -> np.ndarray:
+        buf = np.empty(2 * n, dtype=np.int8)
+        got = 0
+        deadline = time.monotonic() + max(1.0, n / max(self.sample_rate, 1.0) * 4)
+        while got < n:
+            sr = self.dev.readStream(self.stream, [buf[2 * got:]], n - got, timeoutUs=timeout_us)
+            if sr.ret > 0:
+                got += sr.ret
+            elif sr.ret == -4:  # переповнення — пропуск відліків, читаємо далі
+                continue
+            elif time.monotonic() > deadline:
+                break
+        # int8 I,Q → complex64, повна шкала 128
+        return np.multiply(buf[: 2 * got], np.float32(1 / 128), dtype=np.float32).view(np.complex64)

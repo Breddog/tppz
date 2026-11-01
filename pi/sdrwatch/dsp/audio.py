@@ -64,27 +64,32 @@ class AudioDemod:
             self.f2 = _OverlapFir(lowpass_taps(half / MID_RATE, 63), True)          # канал
         self.f3 = _OverlapFir(lowpass_taps(4e3 / AUDIO_RATE if mode != "wfm" else 0.45, 31), False)
         self.phase = 0.0
+        self._rem = None
         self.prev = np.complex64(1)
         self.deemph = 0.0
         self.agc: float | None = None
 
     def channel(self, iq: np.ndarray, offset_hz: float) -> tuple[np.ndarray, float, float]:
-        """Лише вирізати канал (для демодуляції НА ТЕЛЕФОНІ): iq на SDR_RATE →
-        (комплексний канал, його частота дискретизації, потужність дБ).
-        ЧМ вузька / АМ — 48 кГц, ЧМ широка — 240 кГц."""
-        n = len(iq)
+        """Вирізати канал для демодуляції НА ТЕЛЕФОНІ — найдешевшим способом (як rtl_fm):
+        перенесення на 0 Гц (таблиця гетеродина) + проріджування підсумовуванням (коробковий фільтр).
+        Точний фільтр каналу, демодуляцію, шумодав і гучність робить телефон.
+        ЧМ вузька / АМ — 48 кГц (сума по 50), ЧМ широка — 240 кГц (сума по 10)."""
+        d = 10 if self.mode == "wfm" else 50
+        x = iq.astype(np.complex64, copy=False)
+        if getattr(self, "_rem", None) is not None and len(self._rem):
+            x = np.concatenate([self._rem, x])
+        m = (len(x) // d) * d
+        self._rem = x[m:]
+        x = x[:m]
         w = -2 * np.pi * offset_hz / SDR_RATE
-        lo = np.exp(1j * (self.phase + w * np.arange(n))).astype(np.complex64)
-        self.phase = float((self.phase + w * n) % (2 * np.pi))
-        x = self.f1(iq.astype(np.complex64) * lo)[::10]                       # 240 кГц
-        rate = MID_RATE
-        if self.mode != "wfm":
-            if not hasattr(self, "f48"):
-                self.f48 = _OverlapFir(lowpass_taps(20e3 / MID_RATE, 47), True)
-            x = self.f48(x)[::5]                                                # 48 кГц
-            rate = MID_RATE / 5
-        p = float(np.mean(np.abs(x) ** 2)) + 1e-20 if len(x) else 1e-20
-        return x, rate, float(10 * np.log10(p))
+        key = (m, round(w, 12))
+        if getattr(self, "_lo_key", None) != key:
+            self._lo_key = key
+            self._lo = np.exp(1j * w * np.arange(m)).astype(np.complex64)
+        y = (x * self._lo * np.complex64(np.exp(1j * self.phase))).reshape(-1, d).mean(axis=1)
+        self.phase = float((self.phase + w * m) % (2 * np.pi))
+        p = float(np.mean(np.abs(y) ** 2)) + 1e-20 if len(y) else 1e-20
+        return y.astype(np.complex64), SDR_RATE / d, float(10 * np.log10(p))
 
     def process(self, iq: np.ndarray, offset_hz: float) -> tuple[np.ndarray, float]:
         """iq на SDR_RATE → (звук int16 на AUDIO_RATE, потужність каналу в дБ відносно повної шкали)."""
@@ -151,6 +156,26 @@ def iq_packet(x: np.ndarray, rate: float, freq_hz: float, mode: str, level_db: f
     return head + q.tobytes()
 
 
+def window_levels(iq: np.ndarray, center_hz: float, freqs: list[float], squelch_db: float,
+                  half_bw_hz: float = 8e3, fft_size: int = 8192) -> list[tuple[float, float]]:
+    """Те саме, що window_peaks, але для довільного списку частот (сканування збережених каналів)."""
+    from .spectrum import psd_db
+    s = psd_db(iq, fft_size, 4)
+    bin_hz = SDR_RATE / fft_size
+    noise = float(np.median(s))
+    hb = max(1, int(half_bw_hz / bin_hz))
+    out = []
+    for f in freqs:
+        if abs(f - center_hz) < 20e3 or abs(f - center_hz) > 1.05e6:
+            continue
+        i = int(round((f - center_hz) / bin_hz + fft_size / 2))
+        if hb <= i < fft_size - hb:
+            lvl = float(np.max(s[i - hb:i + hb + 1])) - noise
+            if lvl > squelch_db:
+                out.append((f, lvl))
+    return sorted(out, key=lambda p: -p[1])
+
+
 def window_peaks(iq: np.ndarray, center_hz: float, step_hz: float, start_hz: float, stop_hz: float,
                  squelch_db: float, half_bw_hz: float = 8e3, fft_size: int = 8192) -> list[tuple[float, float]]:
     """Канали сітки (start + k·step) у вікні ±1 МГц навколо center, де є сигнал вище шуму на squelch_db.
@@ -168,13 +193,21 @@ def window_peaks(iq: np.ndarray, center_hz: float, step_hz: float, start_hz: flo
     k0 = int(np.ceil((lo - start_hz) / step_hz))
     k1 = int(np.floor((hi - start_hz) / step_hz))
     hb = max(1, int(half_bw_hz / bin_hz))
+
+    def level(f: float) -> float | None:
+        i = int(round((f - center_hz) / bin_hz + fft_size / 2))
+        return float(np.max(s[i - hb:i + hb + 1])) - noise if hb <= i < fft_size - hb else None
+
     for k in range(k0, k1 + 1):
         f = start_hz + k * step_hz
         if abs(f - center_hz) < 20e3:          # біля нуля — DC-пік HackRF, пропускаємо
             continue
-        i = int(round((f - center_hz) / bin_hz + fft_size / 2))
-        if hb <= i < fft_size - hb:
-            lvl = float(np.max(s[i - hb:i + hb + 1])) - noise
-            if lvl > squelch_db:
-                out.append((f, lvl))
+        lvl = level(f)
+        if lvl is None or lvl <= squelch_db:
+            continue
+        # Лише місцевий максимум: сусідній канал «бризкає» тим самим сигналом — його не беремо
+        nb = [level(f + d) for d in (-step_hz, step_hz)]
+        if any(v is not None and v > lvl + 0.5 for v in nb):
+            continue
+        out.append((f, lvl))
     return sorted(out, key=lambda p: -p[1])

@@ -33,6 +33,8 @@ class SdrConfig:
     amp: bool = False
     auto_gain: bool = True
     ppm: float = 0.0
+    # Формат потоку з SDR: auto (CS8, якщо це рідний формат, як у HackRF) | CS8 | CF32
+    stream_format: str = "auto"
     # Зовнішній ВЧ-тракт: список шляхів {name, start_hz, stop_hz, gpio:{pin:0/1}, bias_tee, lo_hz, gain_db}
     # (див. frontend.py і docs/HARDWARE.md). Порожньо — антена напряму в SDR.
     frontend: list = field(default_factory=list)

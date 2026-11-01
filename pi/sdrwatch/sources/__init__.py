@@ -7,7 +7,9 @@ def create_source(sdr_cfg) -> SdrSource:
         from .simulated import SimulatedSource
         return SimulatedSource()
     from .soapy import SoapySource
-    return SoapySource(sdr_cfg.device_args, ppm=sdr_cfg.ppm)
+    src = SoapySource(sdr_cfg.device_args, ppm=sdr_cfg.ppm)
+    src.stream_format = getattr(sdr_cfg, "stream_format", "auto")
+    return src
 
 
 __all__ = ["SdrSource", "create_source"]

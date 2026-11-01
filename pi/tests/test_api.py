@@ -328,3 +328,45 @@ def test_audio_iq_channel_for_phone():
     pkt = iq_packet(xs[1][0], 48000, f, "nfm", 25.0, 10.0, True)
     magic, ver, mode, flags, freq, rate, scale, lvl, sq, n = struct.unpack_from("<4sBBHdffffI", pkt)
     assert magic == b"SDRA" and n == len(xs[1][0]) and flags == 1 and len(pkt) == 36 + 4 * n
+
+
+def test_audio_scanner_found_skip_memory(tmp_path):
+    """Сканер звуку: знаходить канали, пропускає заблоковані, сканує збережені частоти."""
+    import time as _t
+
+    from sdrwatch.sources.simulated import Emitter
+    cfg = Config()
+    cfg.storage.path = str(tmp_path / "st")
+    hub = Hub()
+    em = [Emitter(446.10625e6, "nfm", power_dbm=-70, bandwidth_hz=12e3, seed=1),
+          Emitter(446.15625e6, "nfm", power_dbm=-70, bandwidth_hz=12e3, seed=2)]
+    eng = Engine(cfg, SimulatedSource(em), Storage(cfg.storage.path, 50), None, hub)
+    eng.start()
+    try:
+        eng.start_audio(None, "nfm", 10.0, {"start_hz": 446.00625e6, "stop_hz": 446.19375e6, "step_hz": 12.5e3,
+                                             "hold_s": 0.3})
+
+        def wait_lock(timeout=10):
+            t0 = _t.time()
+            while _t.time() - t0 < timeout:
+                st = eng.audio_status()
+                if st.get("active") and not st["scanning"]:
+                    return st
+                _t.sleep(0.1)
+            raise AssertionError("не зупинився на сигналі")
+
+        st = wait_lock()
+        first = st["freq_hz"]
+        assert abs(first - 446.10625e6) < 7e3 or abs(first - 446.15625e6) < 7e3
+        assert st["scan"]["found"]
+        st = eng.audio_skip()                         # заблокувати й шукати далі
+        assert any(abs(f - first) < 1 for f in st["scan"]["lockout"])
+        _t.sleep(0.5)
+        st = wait_lock()
+        assert abs(st["freq_hz"] - first) > 20e3      # інший канал, заблокований пропущено
+        # Пам'ять: лише збережені частоти
+        eng.start_audio(None, "nfm", 10.0, {"freqs": [446.15625e6, 433.5e6], "hold_s": 0.3, "lockout": []})
+        st = wait_lock()
+        assert abs(st["freq_hz"] - 446.15625e6) < 1
+    finally:
+        eng.stop()

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api.dart';
@@ -52,6 +53,14 @@ class _AudioPanelState extends State<AudioPanel> {
   StreamSubscription? _sub;
   bool _pcmReady = false;
   double _fHz = 446.00625e6;
+  // Сканер
+  String _scanMode = 'preset'; // preset | range | memory
+  _Preset _preset = _presets.first;
+  final _fromCtl = TextEditingController(text: '144.000');
+  final _toCtl = TextEditingController(text: '146.000');
+  double _rangeStep = 12.5e3;
+  double _hold = 2;
+  List<double> _memory = [];
   double _step = 12.5e3;
   Timer? _tuneT;
   DateTime _touched = DateTime(2000);
@@ -66,6 +75,10 @@ class _AudioPanelState extends State<AudioPanel> {
   void initState() {
     super.initState();
     _initPcm();
+    SharedPreferences.getInstance().then((p) {
+      final m = (p.getStringList('audio_memory') ?? const []).map(double.tryParse).whereType<double>().toList();
+      if (mounted) setState(() => _memory = m);
+    });
     widget.listenRequest?.addListener(_onRequest);
     WidgetsBinding.instance.addPostFrameCallback((_) => _onRequest());
   }
@@ -213,15 +226,37 @@ class _AudioPanelState extends State<AudioPanel> {
     setState(() => _listening = true);
   });
 
-  Future<void> _autoscan(_Preset p) => _do(() async {
-    setState(() => _mod = p.mod);
-    await widget.api.post('/api/audio/start', {
-      'mod': p.mod,
-      'squelch_db': _squelch,
-      'scan_start_hz': p.start * 1e6,
-      'scan_stop_hz': p.stop * 1e6,
-      'scan_step_hz': p.step * 1e3,
-    });
+  /// Для картки сканера (окремий віджет) — оновити стан панелі.
+  void update(VoidCallback f) => setState(f);
+
+  Future<void> _saveMemory() async {
+    _memory.sort();
+    (await SharedPreferences.getInstance()).setStringList('audio_memory', [for (final f in _memory) '$f']);
+  }
+
+  /// Сканер: пресет / від–до / збережені частоти. Модуль зупиняється на сигналі вище шумодава,
+  /// після кінця передачі чекає «затримку» й шукає далі (як сканери Uniden / RadioShack).
+  Future<void> _scan() => _do(() async {
+    final body = <String, dynamic>{'mod': _mod, 'squelch_db': _squelch, 'hold_s': _hold};
+    switch (_scanMode) {
+      case 'preset':
+        setState(() => _mod = _preset.mod);
+        body['mod'] = _preset.mod;
+        body['scan_start_hz'] = _preset.start * 1e6;
+        body['scan_stop_hz'] = _preset.stop * 1e6;
+        body['scan_step_hz'] = _preset.step * 1e3;
+      case 'range':
+        final a = double.tryParse(_fromCtl.text.replaceAll(',', '.'));
+        final b = double.tryParse(_toCtl.text.replaceAll(',', '.'));
+        if (a == null || b == null || b <= a) throw ApiException('Вкажіть діапазон «від» < «до», МГц');
+        body['scan_start_hz'] = a * 1e6;
+        body['scan_stop_hz'] = b * 1e6;
+        body['scan_step_hz'] = _rangeStep;
+      default:
+        if (_memory.isEmpty) throw ApiException('Пам\'ять порожня — збережіть частоти кнопкою ★');
+        body['scan_freqs'] = _memory.map((m) => m).toList();
+    }
+    await widget.api.post('/api/audio/start', body);
     _openWs();
     setState(() => _listening = true);
   });
@@ -354,6 +389,23 @@ class _AudioPanelState extends State<AudioPanel> {
                 ),
               ),
             ),
+            IconButton(
+              tooltip: 'Зберегти частоту в пам\'ять сканера',
+              icon: Icon(
+                _memory.any((m) => (m - _fHz).abs() < 1) ? Icons.star : Icons.star_border,
+                color: Colors.amberAccent,
+              ),
+              onPressed: () {
+                setState(() {
+                  if (_memory.any((m) => (m - _fHz).abs() < 1)) {
+                    _memory.removeWhere((m) => (m - _fHz).abs() < 1);
+                  } else {
+                    _memory.add(_fHz);
+                  }
+                });
+                _saveMemory();
+              },
+            ),
             // Один натиск — звук увімк./вимк.
             SizedBox(
               width: 76,
@@ -450,26 +502,13 @@ class _AudioPanelState extends State<AudioPanel> {
             onPressed: _stop,
           ),
 
-        // ---- автоскан ----
+        // ---- сканер (автоскан звуку) ----
         const SizedBox(height: 12),
-        const Text('Автоскан діапазону', style: TextStyle(fontWeight: FontWeight.bold)),
-        const Text(
-          'Модуль перевіряє ~2 МГц за раз і зупиняється на першому сигналі вище шумодава; '
-          'сигнал зник на 2 с — шукає далі.',
-          style: TextStyle(color: Colors.white54, fontSize: 12),
-        ),
-        const SizedBox(height: 6),
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            for (final p in _presets)
-              ActionChip(
-                avatar: const Icon(Icons.autorenew, size: 16),
-                label: Text('${p.name} · ${_mods[p.mod]}'),
-                onPressed: () => _autoscan(p),
-              ),
-          ],
+        _ScannerCard(
+          state: this,
+          scan: (a['scan'] as Map?)?.cast<String, dynamic>(),
+          scanning: a['scanning'] == true,
+          active: active,
         ),
         if (!_listening && !active)
           const Padding(
@@ -481,6 +520,223 @@ class _AudioPanelState extends State<AudioPanel> {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _ScannerCard extends StatelessWidget {
+  const _ScannerCard({required this.state, required this.scan, required this.scanning, required this.active});
+
+  final _AudioPanelState state;
+  final Map<String, dynamic>? scan;
+  final bool scanning;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final st = state;
+    final api = st.widget.api;
+    final found = ((scan?['found'] as List?) ?? const []).cast<Map<String, dynamic>>();
+    final lockout = ((scan?['lockout'] as List?) ?? const []).cast<num>();
+    String ago(num? t) {
+      if (t == null) return '';
+      final s = DateTime.now().millisecondsSinceEpoch / 1000 - t;
+      return s < 60
+          ? '${s.round()} с тому'
+          : (s < 3600 ? '${(s / 60).round()} хв тому' : '${(s / 3600).round()} год тому');
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.radar, size: 18),
+                const SizedBox(width: 6),
+                const Expanded(
+                  child: Text('Сканер (автоскан звуку)', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                if (scan != null)
+                  Text(
+                    scanning ? 'шукає…' : 'на сигналі',
+                    style: TextStyle(color: scanning ? Colors.white60 : Colors.greenAccent, fontSize: 12),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'preset', label: Text('Пресети')),
+                ButtonSegment(value: 'range', label: Text('Від–до')),
+                ButtonSegment(value: 'memory', label: Text('Пам\'ять')),
+              ],
+              selected: {st._scanMode},
+              onSelectionChanged: (v) => st.update(() => st._scanMode = v.first),
+            ),
+            const SizedBox(height: 6),
+            if (st._scanMode == 'preset')
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final p in _AudioPanelState._presets)
+                    ChoiceChip(
+                      label: Text('${p.name} · ${_AudioPanelState._mods[p.mod]}'),
+                      selected: identical(st._preset, p),
+                      onSelected: (_) => st.update(() => st._preset = p),
+                    ),
+                ],
+              ),
+            if (st._scanMode == 'range') ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: st._fromCtl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(
+                        labelText: 'Від, МГц',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: st._toCtl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(
+                        labelText: 'До, МГц',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                children: [
+                  for (final s in const [5e3, 6.25e3, 8.33e3, 12.5e3, 25e3, 100e3])
+                    ChoiceChip(
+                      label: Text('крок ${(s / 1e3).toStringAsFixed(s % 1000 == 0 ? 0 : 2)} кГц'),
+                      selected: st._rangeStep == s,
+                      onSelected: (_) => st.update(() => st._rangeStep = s),
+                    ),
+                ],
+              ),
+            ],
+            if (st._scanMode == 'memory')
+              st._memory.isEmpty
+                  ? const Text(
+                      'Збережіть частоти зірочкою ★ біля дисплея частоти — сканер обходитиме лише їх.',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    )
+                  : Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final m in st._memory)
+                          InputChip(
+                            label: Text((m / 1e6).toStringAsFixed(4)),
+                            onPressed: () => st._setFreq(m),
+                            onDeleted: () {
+                              st.update(() => st._memory.remove(m));
+                              st._saveMemory();
+                            },
+                          ),
+                      ],
+                    ),
+            Row(
+              children: [
+                Text('Затримка після передачі: ${st._hold.toStringAsFixed(1)} с', style: const TextStyle(fontSize: 13)),
+                Expanded(
+                  child: Slider(
+                    value: st._hold,
+                    min: 0.5,
+                    max: 10,
+                    divisions: 19,
+                    onChanged: (v) => st.update(() => st._hold = v),
+                  ),
+                ),
+              ],
+            ),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                FilledButton.icon(
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Сканувати'),
+                  onPressed: st._scan,
+                ),
+                if (scan != null && !scanning)
+                  FilledButton.tonalIcon(
+                    icon: const Icon(Icons.block),
+                    label: const Text('Пропустити (блок.)'),
+                    onPressed: () => st._do(() => api.post('/api/audio/skip')),
+                  ),
+                if (scan != null && !scanning)
+                  FilledButton.tonalIcon(
+                    icon: const Icon(Icons.skip_next),
+                    label: const Text('Далі'),
+                    onPressed: () => st._do(() => api.post('/api/audio/resume')),
+                  ),
+                if (active)
+                  OutlinedButton.icon(icon: const Icon(Icons.stop), label: const Text('Стоп'), onPressed: st._stop),
+              ],
+            ),
+            if (found.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Знайдено (${found.length}) — натисніть, щоб слухати; ★ — у пам\'ять',
+                style: const TextStyle(color: Colors.white60, fontSize: 12),
+              ),
+              for (final e in found.take(15))
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.record_voice_over, color: Colors.lightBlueAccent),
+                  title: Text('${((e['freq_hz'] as num) / 1e6).toStringAsFixed(4)} МГц'),
+                  subtitle: Text('+${e['level_db']} дБ · ${e['hits']}× · ${ago(e['last_seen'] as num?)}'),
+                  onTap: () {
+                    st._freq.text = (((e['freq_hz'] as num) / 1e6)).toStringAsFixed(5);
+                    st._listen();
+                  },
+                  trailing: IconButton(
+                    icon: const Icon(Icons.star_border, color: Colors.amberAccent),
+                    onPressed: () {
+                      final f = (e['freq_hz'] as num).toDouble();
+                      if (!st._memory.any((m) => (m - f).abs() < 1)) {
+                        st.update(() => st._memory.add(f));
+                        st._saveMemory();
+                      }
+                    },
+                  ),
+                ),
+            ],
+            if (lockout.isNotEmpty) ...[
+              const Text('Заблоковані (пропускаються):', style: TextStyle(color: Colors.white60, fontSize: 12)),
+              Wrap(
+                spacing: 6,
+                children: [
+                  for (final f in lockout)
+                    InputChip(
+                      avatar: const Icon(Icons.block, size: 14),
+                      label: Text((f / 1e6).toStringAsFixed(4)),
+                      onDeleted: () => st._do(() => api.post('/api/audio/resume?unlock=$f')),
+                    ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }

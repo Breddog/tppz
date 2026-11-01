@@ -199,11 +199,22 @@ class Engine:
         if mod not in au.MODES:
             raise ValueError("Невідома модуляція")
         if scan:
-            start, stop = float(scan["start_hz"]), float(scan["stop_hz"])
-            step = float(scan.get("step_hz") or 12.5e3)
-            if stop <= start or step <= 0:
-                raise ValueError("Невірний діапазон автоскану")
-            scan = {"start_hz": start, "stop_hz": stop, "step_hz": step, "hold_s": float(scan.get("hold_s", 2.0))}
+            mem = sorted(float(f) for f in (scan.get("freqs") or []))
+            if mem:
+                # Сканування збережених частот (пам'ять): вікна по 2 МГц — кілька каналів одним записом
+                start, stop, step = mem[0], mem[-1], 12.5e3
+            else:
+                start, stop = float(scan["start_hz"]), float(scan["stop_hz"])
+                step = float(scan.get("step_hz") or 12.5e3)
+                if stop <= start or step <= 0:
+                    raise ValueError("Невірний діапазон автоскану")
+            old = (self.audio or {}).get("scan") or {}
+            scan = {"start_hz": start, "stop_hz": stop, "step_hz": step, "freqs": mem,
+                    "hold_s": float(scan.get("hold_s", 2.0)),
+                    # None — лишити старі блокування; [] — зняти всі
+                    "lockout": sorted(set(float(f) for f in (scan.get("lockout") if scan.get("lockout") is not None
+                                                              else old.get("lockout") or []))),
+                    "found": old.get("found", {}), "rounds": 0, "mem_i": 0}
             freq_hz = freq_hz or start
         if freq_hz is None:
             raise ValueError("Потрібна частота")
@@ -234,6 +245,38 @@ class Engine:
                 a["demod"].set_mode(mod)
         return self.audio_status()
 
+    def _audio_resume(self) -> None:
+        a = self.audio
+        sc = a and a.get("scan")
+        if not sc:
+            return
+        a["locked"] = False
+        if sc.get("freqs"):
+            mem = sc["freqs"]
+            nxt = next((k for k in range(len(mem)) if mem[k] > a["freq_hz"] + sc["step_hz"] / 2), None)
+            sc["mem_i"] = 0 if nxt is None else nxt
+        else:
+            a["center"] = a["freq_hz"] + 1.0e6 + sc["step_hz"]   # продовжити одразу за цим каналом
+
+    def audio_skip(self) -> dict:
+        """Пропустити поточну частоту (блокування, як «Lockout» у сканерах) і шукати далі."""
+        a = self.audio
+        if a and a.get("scan"):
+            sc = a["scan"]
+            if all(abs(f - a["freq_hz"]) > sc["step_hz"] / 2 for f in sc["lockout"]):
+                sc["lockout"].append(float(a["freq_hz"]))
+            self._audio_resume()
+        return self.audio_status()
+
+    def audio_resume(self, unlock: float | None = None) -> dict:
+        """Продовжити пошук (затримка не чекається); unlock — зняти блокування з частоти."""
+        a = self.audio
+        if a and a.get("scan"):
+            if unlock is not None:
+                a["scan"]["lockout"] = [f for f in a["scan"]["lockout"] if abs(f - unlock) > 1]
+            self._audio_resume()
+        return self.audio_status()
+
     def stop_audio(self) -> dict:
         with self._lock:
             self.audio = None
@@ -246,9 +289,16 @@ class Engine:
         a = self.audio
         if not a or self.mode != "audio":
             return {"active": False}
+        sc = a["scan"]
+        scan = None
+        if sc:
+            found = sorted(sc["found"].values(), key=lambda e: -e["last_seen"])[:40]
+            scan = {"start_hz": sc["start_hz"], "stop_hz": sc["stop_hz"], "step_hz": sc["step_hz"],
+                    "hold_s": sc["hold_s"], "memory": len(sc.get("freqs") or []), "rounds": sc["rounds"],
+                    "lockout": sc["lockout"], "found": found, "center_hz": round(a["center"])}
         return {"active": True, "freq_hz": round(a["freq_hz"]), "mod": a["mod"], "squelch_db": a["squelch_db"],
-                "open": a["open"], "level_db": a["level_db"], "scanning": bool(a["scan"]) and not a["locked"],
-                "scan": a["scan"]}
+                "open": a["open"], "level_db": a["level_db"], "scanning": bool(sc) and not a["locked"],
+                "scan": scan}
 
     def _audio_step(self) -> None:
         from .dsp import audio as au
@@ -264,20 +314,48 @@ class Engine:
         sc = a["scan"]
         if sc and not a["locked"]:
             # Автоскан: одне вікно ±1 МГц за запис, шукаємо канали сітки вище шумодава
+            mem = sc.get("freqs") or []
+            if mem:
+                # центр вікна — так, щоб охопити якнайбільше збережених частот (від поточної)
+                i0 = sc["mem_i"] % len(mem)
+                a["center"] = mem[i0] + 0.9e6
             if a["tuned"] != a["center"]:
                 self._tune(a["center"])
                 a["tuned"] = a["center"]
             iq = self._read(int(au.SDR_RATE * 0.015))
-            peaks = au.window_peaks(iq, a["center"], sc["step_hz"], sc["start_hz"], sc["stop_hz"],
-                                    a["squelch_db"])
+            lock = sc.get("lockout") or []
+            if mem:
+                cand = [f for f in mem if abs(f - a["center"]) <= 1.0e6]
+                peaks = au.window_levels(iq, a["center"], cand, a["squelch_db"])
+            else:
+                peaks = au.window_peaks(iq, a["center"], sc["step_hz"], sc["start_hz"], sc["stop_hz"],
+                                        a["squelch_db"])
+            peaks = [p for p in peaks if all(abs(p[0] - f) > sc["step_hz"] / 2 for f in lock)]
             if peaks:
                 a["freq_hz"], a["level_db"] = peaks[0][0], round(peaks[0][1], 1)
                 a["locked"], a["last_open"] = True, now
                 a["demod"] = au.AudioDemod(a["mod"])
+                key = f"{a['freq_hz'] / 1e6:.4f}"
+                e = sc["found"].setdefault(key, {"freq_hz": round(a["freq_hz"]), "hits": 0, "first_seen": now})
+                e.update({"last_seen": now, "level_db": a["level_db"]})
+                e["hits"] += 1
+                if len(sc["found"]) > 100:
+                    for k in sorted(sc["found"], key=lambda k: sc["found"][k]["last_seen"])[:10]:
+                        sc["found"].pop(k, None)
+            elif mem:
+                # наступна група збережених частот, що не влізла у вікно
+                nxt = next((k for k in range(sc["mem_i"] + 1, len(mem)) if mem[k] > a["center"] + 1.0e6), None)
+                if nxt is None:
+                    sc["mem_i"] = 0
+                    sc["rounds"] += 1
+                else:
+                    sc["mem_i"] = nxt
+                a["freq_hz"] = mem[sc["mem_i"]]
             else:
                 nxt = a["center"] + 2.0e6
                 if nxt - 1.0e6 > sc["stop_hz"]:
                     nxt = sc["start_hz"] + 1.0e6
+                    sc["rounds"] += 1
                 a["center"] = nxt
                 a["freq_hz"] = max(sc["start_hz"], nxt - 1.0e6)
             self.hub.publish("live", {"type": "audio", **self.audio_status(), "ts": now})
@@ -290,8 +368,11 @@ class Engine:
             a["tuned"] = a["center"]
         # Блоки по 50 мс — менша затримка звуку
         iq = self._read(int(au.SDR_RATE * 0.05))
-        lvl = au.window_peaks(iq[:32768], a["center"], 1.0, a["freq_hz"], a["freq_hz"], -999.0)
-        a["level_db"] = round(lvl[0][1], 1) if lvl else None
+        # Рівень каналу над шумом: точний (FFT) — раз на 3 блоки, між ними — останній відомий
+        a["lvl_n"] = a.get("lvl_n", 0) + 1
+        if a["lvl_n"] % 3 == 1 or a.get("level_db") is None:
+            lvl = au.window_peaks(iq[:32768], a["center"], 1.0, a["freq_hz"], a["freq_hz"], -999.0)
+            a["level_db"] = round(lvl[0][1], 1) if lvl else None
         a["open"] = a["level_db"] is not None and a["level_db"] >= a["squelch_db"]
         if self.hub.count("audioiq") > 0:
             # Телефон демодулює сам: віддаємо лише вирізаний канал (48 / 240 кГц)
@@ -304,8 +385,7 @@ class Engine:
                 pcm, _ = a["demod"].process(iq, a["freq_hz"] - a["center"])
                 self.hub.publish("audio", pcm.tobytes())
         elif sc and now - a["last_open"] > sc["hold_s"]:
-            a["locked"] = False            # сигнал зник — продовжуємо автоскан з наступного вікна
-            a["center"] += 2.0e6
+            self._audio_resume()            # сигнал зник (затримка минула) — пошук далі
         # Живий спектр навколо частоти (2.4 МГц) — раз на 4 блоки
         a["n"] = a.get("n", 0) + 1
         if a["n"] % 4:
