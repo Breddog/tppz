@@ -99,3 +99,17 @@ def read_clip_frame(storage, file_id: int, n: int) -> tuple[bytes, str] | None:
             return fh.read(ln), f["meta"].get("mime", "image/jpeg")
     except OSError:
         return None
+
+
+def encode_rgb_jpeg(rgb, quality: int = 70, aspect: float = 4 / 3) -> bytes | None:
+    """Кольоровий кадр H×W×3 → JPEG (MJPEG-потік на телефон). None — немає Pillow."""
+    if Image is None:
+        return None
+    h, w, _ = rgb.shape
+    im = Image.fromarray(rgb, "RGB")
+    th = int(round(w / aspect))
+    if th != h:
+        im = im.resize((w, th), Image.BILINEAR)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=quality)
+    return buf.getvalue()

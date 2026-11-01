@@ -41,6 +41,8 @@ class VideoResult:
     afc_offset_hz: float = 0.0          # на скільки треба доналаштувати несучу
     deviation_hz: float = 0.0
     image: np.ndarray | None = field(default=None, repr=False)
+    rgb: np.ndarray | None = field(default=None, repr=False)     # кольоровий кадр (якщо просили колір)
+    color_quality: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -193,7 +195,8 @@ def raw_raster(iq: np.ndarray, fs: float, offset_hz: float = 0.0, width: int = O
 
 
 def demodulate(iq: np.ndarray, fs: float, offset_hz: float = 0.0, *, force_invert: bool | None = None,
-               auto_contrast: bool = True, descramble: bool = True) -> VideoResult:
+               auto_contrast: bool = True, descramble: bool = True, color: bool = False,
+               saturation: float = 1.0) -> VideoResult:
     """Повний ланцюг: IQ → композит → кадр (uint8 H×W)."""
     res = VideoResult()
     if len(iq) < fs * 1e-3:
@@ -203,13 +206,18 @@ def demodulate(iq: np.ndarray, fs: float, offset_hz: float = 0.0, *, force_inver
     x = mix(iq, offset_hz, fs) if offset_hz else iq
     if offset_hz:
         x = fir(x, lowpass_taps(min(0.45, 9e6 / fs), 31))
-    hz = fm_demod(x, fs)
+    from .. import native
+    hz = native.fm_baseband(x, fs, 1)               # C — швидше на ARM; без нього — numpy
+    if hz is None:
+        hz = fm_demod(x, fs)
     p_lo, p_hi = np.percentile(hz[::8], [0.5, 99.5])
     res.afc_offset_hz = float((p_lo + p_hi) / 2)
     res.deviation_hz = float(p_hi - p_lo)
     v = moving_average(hz, max(1, int(round(fs / 6e6))))
     span = max(p_hi - p_lo, 1.0)
-    v = (v - np.median(v)) / span
+    med = np.median(v)
+    v = (v - med) / span
+    raw_c = (hz - med) / span if color else None     # без згладжування — піднесуча кольору ціла
 
     cands = []
     for pol in ((-1, 1) if force_invert is None else ((-1,) if force_invert else (1,))):
@@ -267,4 +275,8 @@ def demodulate(iq: np.ndarray, fs: float, offset_hz: float = 0.0, *, force_inver
     res.scrambled, res.line_corr, res.descrambled = kind, corr, desc
     res.image = img2
     res.is_video = True
+    if color and raw_c is not None and fs >= 4 * 4.5e6:
+        from . import color as col
+        res.rgb, res.color_quality = col.decode(raw_c * pol, sel, fs, res.standard, blank, sync_h,
+                                                width=320, saturation=saturation)
     return res

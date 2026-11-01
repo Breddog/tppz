@@ -694,6 +694,31 @@ def create_app(app_state) -> FastAPI:
         finally:
             st.hub.unsubscribe(sub)
 
+    @app.websocket("/ws/videoc")
+    async def ws_videoc(ws: WebSocket, token: str | None = None, sat: float = 1.0, q: int = 70):
+        """Кольорове відео: колір PAL/NTSC розшифровує модуль, кадри — JPEG (MJPEG)."""
+        try:
+            check_token(token)
+        except HTTPException:
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        sub = st.hub.subscribe("videoc", maxsize=2)
+        sub.options["sat"] = max(0.0, min(3.0, sat))
+        sub.options["q"] = max(30, min(95, q))
+        try:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(sub.q.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    await ws.send_json({"type": "ping"})
+                    continue
+                await ws.send_bytes(frame)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            st.hub.unsubscribe(sub)
+
     @app.websocket("/ws/audioiq")
     async def ws_audioiq(ws: WebSocket, token: str | None = None):
         """Вузька смуга звукового каналу (див. dsp/audio.py iq_packet) — демодулює телефон."""

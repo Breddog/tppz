@@ -507,3 +507,47 @@ def test_video_autoscan_full_uses_sweep(tmp_path):
         assert any(5795 < e["freq_mhz"] < 5805 for e in found), found
     finally:
         eng.stop()
+
+
+def test_color_video_mjpeg(tmp_path):
+    """Кольорове відео: модуль розшифровує PAL і шле JPEG; кольори смуг правильні."""
+    import io
+
+    from PIL import Image
+
+    from sdrwatch.dsp.video import demodulate
+    from sdrwatch.sources.simulated import Emitter
+    s = SimulatedSource([Emitter(5800e6, "analog_color", power_dbm=-55)], noise_dbfs=-62)
+    s.set_sample_rate(20e6)
+    s.set_gain(32, 30, False)
+    s.tune(5800e6)
+    r = demodulate(s.read(int(20e6 * 0.045)), 20e6, color=True)
+    assert r.is_video and r.rgb is not None and r.color_quality > 0.5
+    row = r.rgb[100:200].mean(axis=0)
+    bar = lambda k: row[int((k + 0.5) * 320 / 8)]  # noqa: E731
+    assert bar(1)[2] < 60 and bar(1)[0] > 60                 # жовтий: мало синього
+    assert bar(5)[0] > bar(5)[1] + 80                        # червоний
+    assert bar(6)[2] > bar(6)[0] + 60                        # синій
+    # через WebSocket
+    cfg = Config()
+    cfg._path = str(tmp_path / "config.json")
+    cfg.api.token = "secret"
+    cfg.storage.path = str(tmp_path / "st")
+    hub = Hub()
+    st = Storage(cfg.storage.path, 50)
+    eng = Engine(cfg, SimulatedSource([Emitter(5800e6, "analog_color", power_dbm=-55)]), st, None, hub)
+    eng.start()
+    try:
+        c = TestClient(create_app(AppState(cfg, eng, st, hub, "sdr-test")))
+        c.post("/api/control/watch", json={"freq_hz": 5800e6}, headers={"Authorization": "Bearer secret"})
+        with c.websocket_connect("/ws/videoc?token=secret") as ws:
+            got = None
+            for _ in range(20):
+                m = ws.receive()
+                if m.get("bytes"):
+                    got = m["bytes"]
+                    break
+        im = Image.open(io.BytesIO(got))
+        assert im.mode == "RGB" and im.size[0] == 320
+    finally:
+        eng.stop()

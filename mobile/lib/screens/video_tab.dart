@@ -45,7 +45,9 @@ class VideoTab extends StatefulWidget {
 class _VideoTabState extends State<VideoTab> {
   WebSocketChannel? _ws;
   StreamSubscription? _sub;
-  String _src = 'baseband'; // 'baseband' — декодує телефон | 'jpeg' — старий модуль
+  String _src =
+      'baseband'; // 'baseband' — Ч/Б, декодує телефон | 'color' — колір (модуль, MJPEG) | 'jpeg' — старий модуль
+  double _sat = 1.0; // насиченість кольору
   DateTime? _wsSince;
   DateTime? _lastPacket;
   Timer? _fallbackTimer;
@@ -166,7 +168,9 @@ class _VideoTabState extends State<VideoTab> {
           }
         });
       } else {
-        _ws = WebSocketChannel.connect(Uri.parse(widget.api.wsUrl('/ws/video')));
+        final path = _src == 'color' ? '/ws/videoc' : '/ws/video';
+        final extra = _src == 'color' ? '&sat=${_sat.toStringAsFixed(2)}&q=70' : '';
+        _ws = WebSocketChannel.connect(Uri.parse('${widget.api.wsUrl(path)}$extra'));
         _sub = _ws!.stream.listen(
           (data) {
             if (data is! List<int>) return;
@@ -486,7 +490,11 @@ class _VideoTabState extends State<VideoTab> {
                         if ((s?.scrambled ?? pv['scrambled']) != null)
                           'скремблювання: ${s?.scrambled ?? pv['scrambled']}',
                         '${_fps.toStringAsFixed(0)} кадр/с · ${(_kbps / 1000).toStringAsFixed(1)} Мбіт/с'
-                            '${_src == 'baseband' ? ' · декодує телефон' : ' · старий модуль'}',
+                            '${switch (_src) {
+                              'baseband' => ' · Ч/Б, декодує телефон',
+                              'color' => ' · колір, декодує модуль',
+                              _ => ' · старий модуль',
+                            }}',
                         if (_dec.accumulate > 1) 'накопичення ×${_dec.accumulate}',
                       ],
                       good: isVideo,
@@ -774,99 +782,144 @@ class _VideoTabState extends State<VideoTab> {
         _GainCard(api: widget.api),
 
         // ---- слабкі сигнали та зображення (усе рахує телефон) ----
-        if (_src == 'baseband')
+        if (_src != 'jpeg')
           Card(
             margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
             child: ExpansionTile(
               shape: const Border(),
+              initiallyExpanded: false,
               title: const Text('Зображення', style: TextStyle(fontWeight: FontWeight.bold)),
               subtitle: Text(
-                'накопичення ×${_dec.accumulate} · контраст ×${_dec.gain.toStringAsFixed(1)} · '
-                '${_qualities[_quality]}',
+                _src == 'color'
+                    ? 'колір (модуль, MJPEG) · насиченість ×${_sat.toStringAsFixed(1)}'
+                    : 'Ч/Б (телефон) · накопичення ×${_dec.accumulate} · ${_qualities[_quality]}',
                 style: const TextStyle(fontSize: 12),
               ),
               childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
               expandedCrossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    SizedBox(width: 150, child: Text('Накопичення ×${_dec.accumulate}')),
-                    Expanded(
-                      child: Slider(
-                        value: _dec.accumulate.toDouble(),
-                        min: 1,
-                        max: 16,
-                        divisions: 15,
-                        onChanged: (v) => setState(() => _dec.accumulate = v.round()),
-                      ),
-                    ),
-                  ],
-                ),
-                Row(
-                  children: [
-                    SizedBox(width: 150, child: Text('Контраст ×${_dec.gain.toStringAsFixed(1)}')),
-                    Expanded(
-                      child: Slider(
-                        value: _dec.gain,
-                        min: 1,
-                        max: 3,
-                        divisions: 20,
-                        onChanged: (v) => setState(() => _dec.gain = v),
-                      ),
-                    ),
-                  ],
-                ),
-                const Text(
-                  'Накопичення усереднює кадри: шум зменшується, а нерухома картинка проявляється навіть '
-                  'зі «снігу». Для руху тримайте ×1–3.',
-                  style: TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-                const SizedBox(height: 8),
-                const Text('Якість потоку з модуля', style: TextStyle(fontSize: 13)),
-                const SizedBox(height: 4),
                 SegmentedButton<String>(
-                  segments: [for (final e in _qualities.entries) ButtonSegment(value: e.key, label: Text(e.value))],
-                  selected: {_quality},
+                  segments: const [
+                    ButtonSegment(
+                      value: 'baseband',
+                      icon: Icon(Icons.contrast, size: 18),
+                      label: Text('Ч/Б (телефон)'),
+                    ),
+                    ButtonSegment(value: 'color', icon: Icon(Icons.palette, size: 18), label: Text('Колір (модуль)')),
+                  ],
+                  selected: {_src},
                   onSelectionChanged: (v) {
-                    setState(() => _quality = v.first);
+                    setState(() {
+                      _src = v.first;
+                      _jpeg.value = null;
+                    });
                     _reconnect();
                   },
                 ),
-                const Text(
-                  'Економно ≈6 Мбіт/с (точка доступу телефона), звичайно ≈16, детально ≈27 Мбіт/с (Wi-Fi роутер).',
-                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                Text(
+                  _src == 'color'
+                      ? 'Колір PAL/NTSC розшифровує модуль на повній частоті й шле кадри JPEG (~3 Мбіт/с). '
+                            'На слабкому сигналі колір зникає (як у телевізорах).'
+                      : 'Найменша затримка; накопичення кадрів для слабких сигналів. Без кольору.',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
-                const SizedBox(height: 8),
-                const Text('Полярність відео', style: TextStyle(fontSize: 13)),
-                const SizedBox(height: 4),
-                SegmentedButton<Polarity>(
-                  segments: const [
-                    ButtonSegment(value: Polarity.auto, label: Text('Авто')),
-                    ButtonSegment(value: Polarity.normal, label: Text('Норм.')),
-                    ButtonSegment(value: Polarity.inverted, label: Text('Інв.')),
-                  ],
-                  selected: {_dec.polarity},
-                  onSelectionChanged: (v) => setState(() => _dec.polarity = v.first),
-                ),
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Дескремблювання'),
-                  value: _dec.descramble,
-                  onChanged: (v) => setState(() => _dec.descramble = v),
-                ),
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Авто-контраст'),
-                  value: _dec.autoContrast,
-                  onChanged: (v) => setState(() => _dec.autoContrast = v),
-                ),
-                if (_dropped > 0)
-                  Text(
-                    'Пропущено полів (телефон не встигав): $_dropped',
-                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                if (_src == 'color')
+                  Row(
+                    children: [
+                      SizedBox(width: 150, child: Text('Насиченість ×${_sat.toStringAsFixed(1)}')),
+                      Expanded(
+                        child: Slider(
+                          value: _sat,
+                          min: 0,
+                          max: 2.5,
+                          divisions: 25,
+                          onChanged: (v) => setState(() => _sat = v),
+                          onChangeEnd: (_) => _reconnect(),
+                        ),
+                      ),
+                    ],
                   ),
+                if (_src == 'baseband') ...[
+                  Row(
+                    children: [
+                      SizedBox(width: 150, child: Text('Накопичення ×${_dec.accumulate}')),
+                      Expanded(
+                        child: Slider(
+                          value: _dec.accumulate.toDouble(),
+                          min: 1,
+                          max: 16,
+                          divisions: 15,
+                          onChanged: (v) => setState(() => _dec.accumulate = v.round()),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      SizedBox(width: 150, child: Text('Контраст ×${_dec.gain.toStringAsFixed(1)}')),
+                      Expanded(
+                        child: Slider(
+                          value: _dec.gain,
+                          min: 1,
+                          max: 3,
+                          divisions: 20,
+                          onChanged: (v) => setState(() => _dec.gain = v),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Text(
+                    'Накопичення усереднює кадри: шум зменшується, а нерухома картинка проявляється навіть '
+                    'зі «снігу». Для руху тримайте ×1–3.',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text('Якість потоку з модуля', style: TextStyle(fontSize: 13)),
+                  const SizedBox(height: 4),
+                  SegmentedButton<String>(
+                    segments: [for (final e in _qualities.entries) ButtonSegment(value: e.key, label: Text(e.value))],
+                    selected: {_quality},
+                    onSelectionChanged: (v) {
+                      setState(() => _quality = v.first);
+                      _reconnect();
+                    },
+                  ),
+                  const Text(
+                    'Економно ≈6 Мбіт/с (точка доступу телефона), звичайно ≈16, детально ≈27 Мбіт/с (Wi-Fi роутер).',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text('Полярність відео', style: TextStyle(fontSize: 13)),
+                  const SizedBox(height: 4),
+                  SegmentedButton<Polarity>(
+                    segments: const [
+                      ButtonSegment(value: Polarity.auto, label: Text('Авто')),
+                      ButtonSegment(value: Polarity.normal, label: Text('Норм.')),
+                      ButtonSegment(value: Polarity.inverted, label: Text('Інв.')),
+                    ],
+                    selected: {_dec.polarity},
+                    onSelectionChanged: (v) => setState(() => _dec.polarity = v.first),
+                  ),
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Дескремблювання'),
+                    value: _dec.descramble,
+                    onChanged: (v) => setState(() => _dec.descramble = v),
+                  ),
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Авто-контраст'),
+                    value: _dec.autoContrast,
+                    onChanged: (v) => setState(() => _dec.autoContrast = v),
+                  ),
+                  if (_dropped > 0)
+                    Text(
+                      'Пропущено полів (телефон не встигав): $_dropped',
+                      style: const TextStyle(color: Colors.white38, fontSize: 11),
+                    ),
+                ],
               ],
             ),
           ),

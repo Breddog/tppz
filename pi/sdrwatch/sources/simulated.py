@@ -24,6 +24,37 @@ STANDARDS = {
 }
 
 
+# Кольорові смуги (як ТВ-таблиця): білий, жовтий, блакитний, зелений, пурпуровий, червоний, синій, чорний
+_BARS_RGB = np.array([[1, 1, 1], [1, 1, 0], [0, 1, 1], [0, 1, 0], [1, 0, 1], [1, 0, 0], [0, 0, 1], [0, 0, 0]],
+                     np.float64) * 0.75
+FSC = {"PAL": 4.43361875e6, "NTSC": 3.579545e6}
+
+
+def color_chroma(t: np.ndarray, standard: str = "PAL") -> np.ndarray:
+    """Кольорова складова (у вольтах) для смуг: C = U·sin(ωt) ± V·cos(ωt) + сплеск 0.15 В.
+
+    PAL: знак V чергується від рядка до рядка, сплеск 135°/225°; NTSC: сплеск 180°, без чергування.
+    """
+    st = STANDARDS[standard]
+    line_s = st["line_s"]
+    line_no = np.floor(t / line_s)
+    pos = t - line_no * line_s
+    x = (pos - 10.5e-6) / 52e-6
+    w = 2 * np.pi * FSC[standard]
+    bar = np.clip((x * 8).astype(int), 0, 7)
+    rgb = _BARS_RGB[bar]
+    y = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+    u = 0.493 * (rgb[:, 2] - y) * 0.7          # у вольтах (білий = 0.7 В)
+    vv = 0.877 * (rgb[:, 0] - y) * 0.7
+    sgn = np.where(np.mod(line_no, 2) == 0, 1.0, -1.0) if standard == "PAL" else np.ones_like(t)
+    active = (x >= 0) & (x < 1)
+    c = np.where(active, u * np.sin(w * t) + sgn * vv * np.cos(w * t), 0.0)
+    burst = (pos >= 5.6e-6) & (pos < 7.85e-6)
+    bph = (np.pi - sgn * np.pi / 4) if standard == "PAL" else np.full_like(t, np.pi)
+    c = np.where(burst, 0.15 * np.sin(w * t + bph), c)
+    return c.astype(np.float32)
+
+
 def composite(t: np.ndarray, standard: str = "PAL", scramble_seed: int | None = None,
               pattern_phase: float = 0.0) -> np.ndarray:
     """Композитний відеосигнал (у вольтах: синхро −0.3, чорний 0, білий 0.7)."""
@@ -111,6 +142,8 @@ class Emitter:
         if self.kind.startswith("analog"):
             v = composite(t, self.standard,
                           scramble_seed=self.seed if self.kind == "analog_scrambled" else None)
+            if self.kind == "analog_color":
+                v = v + color_chroma(t, self.standard)
             if self.kind == "analog_inverted":
                 v = -v
             dev = 8e6  # девіація FM, Гц на 1 В (≈18 МГц зайнятої смуги, як у VTX)

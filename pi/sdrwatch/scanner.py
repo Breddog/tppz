@@ -24,7 +24,7 @@ from . import distance as dist
 from .dsp import baseband, classifier, spectrum, video
 from .frontend import FrontEnd
 from .hub import Hub
-from .imaging import ClipWriter, encode
+from .imaging import ClipWriter, encode, encode_rgb_jpeg
 from .notifier import Notifier
 from .storage import Storage
 from .tracker import Track, Tracker
@@ -1344,8 +1344,9 @@ class Engine:
         self._tune(f)
         # Телефон декодує сам (канал «baseband»): Pi лише дискримінатор + проріджування — швидко.
         phone = self.hub.count("baseband") > 0
+        colorq = self.hub.count("videoc") > 0       # кольоровий MJPEG: колір розшифровує модуль
         legacy = self.hub.count("video") > 0 or self.recording
-        cap = baseband.FIELD_S if (phone and not legacy) else d.video_capture_s
+        cap = baseband.FIELD_S if (phone and not legacy and not colorq) else d.video_capture_s
         iq = self._read(int(fs * cap))
         self._agc(iq)
         self._watch_n = getattr(self, "_watch_n", 0) + 1
@@ -1373,6 +1374,18 @@ class Engine:
             n_field = int(fs * baseband.FIELD_S)
             pkt, info = baseband.make_packet(iq[:n_field], fs, f, self.hub.option("baseband", "quality", "normal"))
             self.hub.publish("baseband", pkt)
+        if colorq and not legacy:
+            res_c = video.demodulate(iq, fs, 0.0, force_invert=self.video_opts["invert"], auto_contrast=False,
+                                     descramble=False, color=True,
+                                     saturation=float(self.hub.option("videoc", "sat", 1.0)))
+            if res_c.is_video and res_c.rgb is not None:
+                jpg = encode_rgb_jpeg(res_c.rgb, int(self.hub.option("videoc", "q", 70)))
+            else:
+                jpg, _ = encode(video.raw_raster(iq, fs))          # немає відео — сніг
+            if jpg:
+                self.hub.publish("videoc", jpg)
+            if info is None:
+                info = {**res_c.to_dict(), "decoder": "module-color", "color_quality": round(res_c.color_quality, 2)}
         if legacy:
             res = video.demodulate(iq, fs, 0.0, force_invert=self.video_opts["invert"],
                                    auto_contrast=self.video_opts["auto_contrast"],
