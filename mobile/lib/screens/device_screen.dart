@@ -284,9 +284,13 @@ class _LiveTabState extends State<LiveTab> {
                   showSelectedIcon: false,
                   style: const ButtonStyle(visualDensity: VisualDensity.compact),
                   segments: const [
-                    ButtonSegment(value: ViewMode.spectrum, label: Text('Спектр')),
-                    ButtonSegment(value: ViewMode.waterfall, label: Text('Водоспад')),
-                    ButtonSegment(value: ViewMode.both, icon: Icon(Icons.view_agenda_outlined, size: 18)),
+                    ButtonSegment(value: ViewMode.spectrum, icon: Icon(Icons.show_chart, size: 18), tooltip: 'Спектр'),
+                    ButtonSegment(value: ViewMode.waterfall, icon: Icon(Icons.water, size: 18), tooltip: 'Водоспад'),
+                    ButtonSegment(
+                      value: ViewMode.both,
+                      icon: Icon(Icons.view_agenda_outlined, size: 18),
+                      tooltip: 'Спектр + водоспад',
+                    ),
                   ],
                   selected: {_mode},
                   onSelectionChanged: (s) => setState(() => _mode = s.first),
@@ -297,6 +301,23 @@ class _LiveTabState extends State<LiveTab> {
                 tooltip: 'Утримання піків',
                 icon: Icon(Icons.vertical_align_top, color: _peak ? Colors.orangeAccent : Colors.white38),
                 onPressed: () => setState(() => _peak = !_peak),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Жести',
+                icon: const Icon(Icons.help_outline),
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Жести'),
+                    content: const Text(
+                      '• Два пальці — масштаб\n• Тягнути — прокрутка частот\n• Утримати — маркер: «Відео тут» / '
+                      '«Слухати тут»\n• Подвійний дотик — увесь діапазон\n• Водоспад угору/вниз — історія\n'
+                      '• Дотик по сигналу — деталі',
+                    ),
+                    actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Зрозуміло'))],
+                  ),
+                ),
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
@@ -431,19 +452,6 @@ class _LiveTabState extends State<LiveTab> {
               );
             },
           ),
-        ),
-        const Padding(
-          padding: EdgeInsets.fromLTRB(10, 2, 10, 2),
-          child: Text(
-            'Два пальці — масштаб · тягнути — прокрутка · утримати — маркер · подвійний дотик — увесь діапазон · '
-            'водоспад угору/вниз — історія',
-            style: TextStyle(color: Colors.white38, fontSize: 10.5),
-          ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          flex: 3,
-          child: HintsPanel(signals: l.signals, peakHz: null, onTap: widget.onSignal),
         ),
       ],
     );

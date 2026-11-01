@@ -201,12 +201,6 @@ class _ControlTabState extends State<ControlTab> {
               help: 'Більше — швидше оглядається весь ефір, але рідше оновлюються FPV-діапазони',
             ),
 
-          const ListTile(
-            dense: true,
-            leading: Icon(Icons.tune),
-            title: Text('Підсилення приймача (LNA / VGA / AMP) — у вкладці «Відео», блок «Приймач»'),
-          ),
-
           _h('Виявлення сигналів'),
           Builder(
             builder: (_) {
@@ -331,35 +325,48 @@ class _ControlTabState extends State<ControlTab> {
             },
           ),
 
-          _h('Push-сповіщення з модуля'),
-          SwitchListTile(
-            title: const Text('Сповіщення з модуля'),
-            subtitle: const Text('ntfy / Telegram / вебхук — працюють навіть без фонового режиму на телефоні'),
-            value: nt['enabled'] as bool,
-            onChanged: (v) => _patch({
-              'notify': {'enabled': v},
-            }),
-          ),
-          _textTile(
-            'ntfy URL (https://ntfy.sh/ваш-секретний-топік)',
-            nt['ntfy_url'] as String,
-            (v) => _patch({
-              'notify': {'ntfy_url': v},
-            }),
-          ),
-          _textTile(
-            'Telegram bot token',
-            nt['telegram_token'] as String,
-            (v) => _patch({
-              'notify': {'telegram_token': v},
-            }),
-          ),
-          _textTile(
-            'Telegram chat id',
-            nt['telegram_chat_id'] as String,
-            (v) => _patch({
-              'notify': {'telegram_chat_id': v},
-            }),
+          ExpansionTile(
+            leading: const Icon(Icons.notifications_outlined),
+            title: const Text('Сповіщення з модуля (ntfy / Telegram)'),
+            subtitle: Text(
+              nt['enabled'] != true
+                  ? 'вимкнено'
+                  : [
+                      if ((nt['ntfy_url'] as String? ?? '').isNotEmpty) 'ntfy',
+                      if ((nt['telegram_chat_id'] as String? ?? '').isNotEmpty) 'Telegram',
+                    ].join(', ').ifEmpty('не налаштовано'),
+            ),
+            children: [
+              SwitchListTile(
+                title: const Text('Сповіщення з модуля'),
+                subtitle: const Text('ntfy / Telegram / вебхук — працюють навіть без фонового режиму на телефоні'),
+                value: nt['enabled'] as bool,
+                onChanged: (v) => _patch({
+                  'notify': {'enabled': v},
+                }),
+              ),
+              _textTile(
+                'ntfy URL (https://ntfy.sh/ваш-секретний-топік)',
+                nt['ntfy_url'] as String,
+                (v) => _patch({
+                  'notify': {'ntfy_url': v},
+                }),
+              ),
+              _textTile(
+                'Telegram bot token',
+                nt['telegram_token'] as String,
+                (v) => _patch({
+                  'notify': {'telegram_token': v},
+                }),
+              ),
+              _textTile(
+                'Telegram chat id',
+                nt['telegram_chat_id'] as String,
+                (v) => _patch({
+                  'notify': {'telegram_chat_id': v},
+                }),
+              ),
+            ],
           ),
 
           _h('Тест приймачів'),
@@ -674,4 +681,8 @@ class _SliderTileState extends State<_SliderTile> {
       ),
     );
   }
+}
+
+extension on String {
+  String ifEmpty(String other) => isEmpty ? other : this;
 }

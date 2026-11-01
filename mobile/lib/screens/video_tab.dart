@@ -8,7 +8,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api.dart';
 import '../live.dart';
-import '../models.dart';
 import '../video/baseband_decoder.dart';
 import 'audio_panel.dart';
 
@@ -613,11 +612,9 @@ class _VideoTabState extends State<VideoTab> {
                 ),
                 const SizedBox(height: 6),
                 Text(switch (_scanMode) {
-                  'grids' => 'Канали вибраних сіток по черзі, ~0.3 с на порожній канал.',
-                  'full' =>
-                    'Увесь діапазон SDR по порядку вікнами ~16 МГц: швидкий спектр, перевірка відео лише там, де '
-                        'є широкий сигнал. Коло — кілька секунд.',
-                  _ => 'Лише вказаний діапазон, по порядку, коло за колом.',
+                  'grids' => 'Канали вибраних сіток по черзі.',
+                  'full' => 'Увесь діапазон SDR по порядку, коло за колом.',
+                  _ => 'Вказаний діапазон по порядку, коло за колом.',
                 }, style: const TextStyle(color: Colors.white54, fontSize: 12)),
                 if (_scanMode == 'grids')
                   Wrap(
@@ -667,50 +664,64 @@ class _VideoTabState extends State<VideoTab> {
                     padding: const EdgeInsets.only(top: 8),
                     child: _ScanProgress(auto: auto),
                   ),
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Шукати й голос (рації < 1.3 ГГц)'),
-                  value: _scanAudio,
-                  onChanged: (v) {
-                    setState(() => _scanAudio = v);
-                    if (auto != null) _autoscan(true);
-                  },
-                ),
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('По колу (не зупинятися на знайденому)'),
-                  value: _circular,
-                  onChanged: (v) {
-                    setState(() => _circular = v);
-                    if (auto != null) _autoscan(true);
-                  },
-                ),
-                if (_circular)
-                  Row(
+                Theme(
+                  data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                  child: ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text(
+                      'Параметри: ${_circular ? 'по колу, показ ${_dwell.round()} с' : 'зупинка на відео'}'
+                      '${_scanAudio ? ', + голос' : ''}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
                     children: [
-                      Text('Показ знайденого: ${_dwell.round()} с', style: const TextStyle(fontSize: 13)),
-                      Expanded(
-                        child: Slider(
-                          value: _dwell,
-                          min: 1,
-                          max: 15,
-                          divisions: 14,
-                          onChanged: (v) => setState(() => _dwell = v),
-                          onChangeEnd: (_) {
-                            if (auto != null) _autoscan(true);
-                          },
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Шукати й голос (рації < 1.3 ГГц)'),
+                        value: _scanAudio,
+                        onChanged: (v) {
+                          setState(() => _scanAudio = v);
+                          if (auto != null) _autoscan(true);
+                        },
+                      ),
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('По колу (не зупинятися на знайденому)'),
+                        value: _circular,
+                        onChanged: (v) {
+                          setState(() => _circular = v);
+                          if (auto != null) _autoscan(true);
+                        },
+                      ),
+                      if (_circular)
+                        Row(
+                          children: [
+                            Text('Показ знайденого: ${_dwell.round()} с', style: const TextStyle(fontSize: 13)),
+                            Expanded(
+                              child: Slider(
+                                value: _dwell,
+                                min: 1,
+                                max: 15,
+                                divisions: 14,
+                                onChanged: (v) => setState(() => _dwell = v),
+                                onChangeEnd: (_) {
+                                  if (auto != null) _autoscan(true);
+                                },
+                              ),
+                            ),
+                          ],
                         ),
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Запускати автоскан, коли відкриваю екран'),
+                        value: _autoStart,
+                        onChanged: (v) => setState(() => _autoStart = v),
                       ),
                     ],
                   ),
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Запускати автоскан, коли відкриваю екран'),
-                  value: _autoStart,
-                  onChanged: (v) => setState(() => _autoStart = v),
                 ),
               ],
             ),
@@ -733,100 +744,101 @@ class _VideoTabState extends State<VideoTab> {
         // ---- приймач: підсилення ----
         _GainCard(api: widget.api),
 
-        // ---- швидкий перехід на знайдене сканером відео ----
-        _VideoSignals(onTune: (hz) => _tune(hz / 1e6, immediate: true)),
-
         // ---- слабкі сигнали та зображення (усе рахує телефон) ----
         if (_src == 'baseband')
           Card(
             margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Слабкі сигнали та зображення', style: TextStyle(fontWeight: FontWeight.bold)),
-                  Row(
-                    children: [
-                      SizedBox(width: 150, child: Text('Накопичення ×${_dec.accumulate}')),
-                      Expanded(
-                        child: Slider(
-                          value: _dec.accumulate.toDouble(),
-                          min: 1,
-                          max: 16,
-                          divisions: 15,
-                          onChanged: (v) => setState(() => _dec.accumulate = v.round()),
-                        ),
-                      ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      SizedBox(width: 150, child: Text('Контраст ×${_dec.gain.toStringAsFixed(1)}')),
-                      Expanded(
-                        child: Slider(
-                          value: _dec.gain,
-                          min: 1,
-                          max: 3,
-                          divisions: 20,
-                          onChanged: (v) => setState(() => _dec.gain = v),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Text(
-                    'Накопичення усереднює кадри: шум зменшується, а нерухома картинка проявляється навіть '
-                    'зі «снігу». Для руху тримайте ×1–3.',
-                    style: TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text('Якість потоку з модуля', style: TextStyle(fontSize: 13)),
-                  const SizedBox(height: 4),
-                  SegmentedButton<String>(
-                    segments: [for (final e in _qualities.entries) ButtonSegment(value: e.key, label: Text(e.value))],
-                    selected: {_quality},
-                    onSelectionChanged: (v) {
-                      setState(() => _quality = v.first);
-                      _reconnect();
-                    },
-                  ),
-                  const Text(
-                    'Економно ≈6 Мбіт/с (точка доступу телефона), звичайно ≈16, детально ≈27 Мбіт/с (Wi-Fi роутер).',
-                    style: TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text('Полярність відео', style: TextStyle(fontSize: 13)),
-                  const SizedBox(height: 4),
-                  SegmentedButton<Polarity>(
-                    segments: const [
-                      ButtonSegment(value: Polarity.auto, label: Text('Авто')),
-                      ButtonSegment(value: Polarity.normal, label: Text('Норм.')),
-                      ButtonSegment(value: Polarity.inverted, label: Text('Інв.')),
-                    ],
-                    selected: {_dec.polarity},
-                    onSelectionChanged: (v) => setState(() => _dec.polarity = v.first),
-                  ),
-                  SwitchListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Дескремблювання'),
-                    value: _dec.descramble,
-                    onChanged: (v) => setState(() => _dec.descramble = v),
-                  ),
-                  SwitchListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Авто-контраст'),
-                    value: _dec.autoContrast,
-                    onChanged: (v) => setState(() => _dec.autoContrast = v),
-                  ),
-                  if (_dropped > 0)
-                    Text(
-                      'Пропущено полів (телефон не встигав): $_dropped',
-                      style: const TextStyle(color: Colors.white38, fontSize: 11),
-                    ),
-                ],
+            child: ExpansionTile(
+              shape: const Border(),
+              title: const Text('Зображення', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text(
+                'накопичення ×${_dec.accumulate} · контраст ×${_dec.gain.toStringAsFixed(1)} · '
+                '${_qualities[_quality]}',
+                style: const TextStyle(fontSize: 12),
               ),
+              childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    SizedBox(width: 150, child: Text('Накопичення ×${_dec.accumulate}')),
+                    Expanded(
+                      child: Slider(
+                        value: _dec.accumulate.toDouble(),
+                        min: 1,
+                        max: 16,
+                        divisions: 15,
+                        onChanged: (v) => setState(() => _dec.accumulate = v.round()),
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    SizedBox(width: 150, child: Text('Контраст ×${_dec.gain.toStringAsFixed(1)}')),
+                    Expanded(
+                      child: Slider(
+                        value: _dec.gain,
+                        min: 1,
+                        max: 3,
+                        divisions: 20,
+                        onChanged: (v) => setState(() => _dec.gain = v),
+                      ),
+                    ),
+                  ],
+                ),
+                const Text(
+                  'Накопичення усереднює кадри: шум зменшується, а нерухома картинка проявляється навіть '
+                  'зі «снігу». Для руху тримайте ×1–3.',
+                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                const Text('Якість потоку з модуля', style: TextStyle(fontSize: 13)),
+                const SizedBox(height: 4),
+                SegmentedButton<String>(
+                  segments: [for (final e in _qualities.entries) ButtonSegment(value: e.key, label: Text(e.value))],
+                  selected: {_quality},
+                  onSelectionChanged: (v) {
+                    setState(() => _quality = v.first);
+                    _reconnect();
+                  },
+                ),
+                const Text(
+                  'Економно ≈6 Мбіт/с (точка доступу телефона), звичайно ≈16, детально ≈27 Мбіт/с (Wi-Fi роутер).',
+                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                const Text('Полярність відео', style: TextStyle(fontSize: 13)),
+                const SizedBox(height: 4),
+                SegmentedButton<Polarity>(
+                  segments: const [
+                    ButtonSegment(value: Polarity.auto, label: Text('Авто')),
+                    ButtonSegment(value: Polarity.normal, label: Text('Норм.')),
+                    ButtonSegment(value: Polarity.inverted, label: Text('Інв.')),
+                  ],
+                  selected: {_dec.polarity},
+                  onSelectionChanged: (v) => setState(() => _dec.polarity = v.first),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Дескремблювання'),
+                  value: _dec.descramble,
+                  onChanged: (v) => setState(() => _dec.descramble = v),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Авто-контраст'),
+                  value: _dec.autoContrast,
+                  onChanged: (v) => setState(() => _dec.autoContrast = v),
+                ),
+                if (_dropped > 0)
+                  Text(
+                    'Пропущено полів (телефон не встигав): $_dropped',
+                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
+              ],
             ),
           ),
 
@@ -947,52 +959,6 @@ class _StepBtn extends StatelessWidget {
       ),
     ),
   );
-}
-
-/// Горизонтальний список знайденого відео — тап переводить екран на нього.
-class _VideoSignals extends StatelessWidget {
-  const _VideoSignals({required this.onTune});
-
-  final void Function(double hz) onTune;
-
-  @override
-  Widget build(BuildContext context) {
-    final l = context.watch<LiveConnection>();
-    final vids = l.signals
-        .where((s) => s.active && ((s.cls?.canShowVideo ?? false) || s.cls?.code == 'digital_video'))
-        .toList();
-    if (vids.isEmpty) return const SizedBox(height: 4);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(14, 8, 14, 2),
-          child: Text(
-            'Знайдене відео — натисніть, щоб подивитися',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
-          ),
-        ),
-        SizedBox(
-          height: 44,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            children: [
-              for (final s in vids)
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: ActionChip(
-                    avatar: Icon(classIcon(s.cls?.code), size: 16, color: classColor(s.cls?.code)),
-                    label: Text('${fmtFreq(s.freqHz)}${s.channelName.isNotEmpty ? ' ${s.channelName}' : ''}'),
-                    onPressed: () => onTune(s.freqHz),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
 }
 
 /// Де зараз автоскан: позиція в діапазоні, коло, час кола.
@@ -1191,31 +1157,36 @@ class _GainCard extends StatelessWidget {
 
     return Card(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Приймач', style: TextStyle(fontWeight: FontWeight.bold)),
-            SwitchListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Автоматичне підсилення'),
-              subtitle: const Text('Знижує підсилення при перевантаженні сильним сигналом'),
-              value: auto,
-              onChanged: (v) => set({'auto': v}),
-            ),
-            slider('LNA', 'lna', 40, 8),
-            slider('VGA', 'vga', 62, 2),
-            SwitchListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              title: const Text('AMP +14 дБ (далекі слабкі сигнали)'),
-              value: g['amp'] == true,
-              onChanged: (v) => set({'amp': v}),
-            ),
-          ],
+      child: ExpansionTile(
+        shape: const Border(),
+        title: const Text('Приймач', style: TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(
+          auto
+              ? 'підсилення автоматичне'
+              : 'LNA ${((g['lna'] as num?) ?? 0).round()} · VGA ${((g['vga'] as num?) ?? 0).round()} дБ'
+                    '${g['amp'] == true ? ' · AMP' : ''}',
+          style: const TextStyle(fontSize: 12),
         ),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        children: [
+          SwitchListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Автоматичне підсилення'),
+            subtitle: const Text('Знижує підсилення при перевантаженні сильним сигналом'),
+            value: auto,
+            onChanged: (v) => set({'auto': v}),
+          ),
+          slider('LNA', 'lna', 40, 8),
+          slider('VGA', 'vga', 62, 2),
+          SwitchListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('AMP +14 дБ (далекі слабкі сигнали)'),
+            value: g['amp'] == true,
+            onChanged: (v) => set({'amp': v}),
+          ),
+        ],
       ),
     );
   }

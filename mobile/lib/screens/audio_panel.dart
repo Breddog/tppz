@@ -10,7 +10,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api.dart';
 import '../audio/audio_demod.dart';
 import '../live.dart';
-import '../widgets/spectrum_view.dart';
 import '../widgets/tuning.dart';
 
 /// Звук з ефіру: рації, мовлення, авіація. Модуль демодулює, телефон лише програє (24 кГц, моно).
@@ -282,7 +281,6 @@ class _AudioPanelState extends State<AudioPanel> {
     }
     final open = a['open'] == true;
     final level = (a['level_db'] as num?)?.toDouble();
-    final frame = l.spectra[-2];
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
       children: [
@@ -360,14 +358,6 @@ class _AudioPanelState extends State<AudioPanel> {
             ),
           ),
         ),
-        if (frame != null)
-          SizedBox(
-            height: 120,
-            child: CustomPaint(
-              painter: SpectrumPainter(frame: frame, peak: null, signals: const [], showPeak: false),
-              child: const SizedBox.expand(),
-            ),
-          ),
         const SizedBox(height: 8),
 
         // ---- частота: дисплей, кнопка «звук», лінійка, колесо, крок ----
@@ -450,11 +440,6 @@ class _AudioPanelState extends State<AudioPanel> {
             TuningKnob(size: 130, onSteps: (n) => _setFreq(_fHz + n * _step)),
           ],
         ),
-        const Text(
-          'Тягніть шкалу або крутіть колесо — частота змінюється на крок; дотик до шкали — перейти туди. '
-          'Під шкалою — живий спектр: горби — сигнали.',
-          style: TextStyle(color: Colors.white38, fontSize: 11),
-        ),
         const SizedBox(height: 8),
         SegmentedButton<String>(
           segments: [for (final e in _mods.entries) ButtonSegment(value: e.key, label: Text(e.value))],
@@ -510,15 +495,6 @@ class _AudioPanelState extends State<AudioPanel> {
           scanning: a['scanning'] == true,
           active: active,
         ),
-        if (!_listening && !active)
-          const Padding(
-            padding: EdgeInsets.only(top: 12),
-            child: Text(
-              'Порада: гучність — кнопками телефону. Поки звук увімкнено, сканування дронів на модулі '
-              'призупинено (приймач один).',
-              style: TextStyle(color: Colors.white38, fontSize: 11.5),
-            ),
-          ),
       ],
     );
   }
