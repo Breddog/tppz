@@ -223,9 +223,17 @@ class _LiveTabState extends State<LiveTab> {
   Widget build(BuildContext context) {
     final l = context.watch<LiveConnection>();
     final ranges = ((l.status['ranges'] as List?) ?? const []).cast<Map<String, dynamic>>();
-    final watching = l.spectra.containsKey(-1) && (l.status['mode'] == 'watch' || l.watch != null);
-    // Під час стеження за замовчуванням — його спектр, але можна вибрати й інший діапазон
-    final sel = (watching && (l.followWatch || l.selectedRange == null)) ? -1 : l.selectedRange;
+    final watching = l.watch != null || l.status['mode'] == 'watch' || l.audio?['active'] == true;
+    final autoscan = l.watch?['autoscan'] != null;
+    // «Наживо» — те, що приймач робить зараз: автоскан (загальний спектр), стеження або звук
+    final liveSrc = l.audio?['active'] == true && l.spectra.containsKey(-2)
+        ? -2
+        : (autoscan && l.spectra.containsKey(-3) ? -3 : -1);
+    final sel = (watching && (l.followWatch || l.selectedRange == null)) ? liveSrc : l.selectedRange;
+    final vfo = l.audio?['active'] == true
+        ? (l.audio!['freq_hz'] as num?)?.toDouble()
+        : (l.watch?['freq_hz'] as num?)?.toDouble();
+    final vfoBw = l.audio?['active'] == true ? 12.5e3 : 8e6;
 
     return Column(
       children: [
@@ -240,23 +248,16 @@ class _LiveTabState extends State<LiveTab> {
                 Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: ChoiceChip(
-                    avatar: const Icon(Icons.gps_fixed, size: 16),
-                    label: const Text('Стеження'),
-                    selected: sel == -1,
+                    avatar: const Icon(Icons.sensors, size: 16),
+                    label: Text(
+                      'Наживо · ${liveSrc == -3
+                          ? 'автоскан'
+                          : liveSrc == -2
+                          ? 'звук'
+                          : 'стеження'}',
+                    ),
+                    selected: sel == liveSrc,
                     onSelected: (_) => setState(() => l.followWatch = true),
-                  ),
-                ),
-              if (l.spectra.containsKey(-3) && l.watch?['autoscan'] != null)
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: ChoiceChip(
-                    avatar: const Icon(Icons.autorenew, size: 16),
-                    label: const Text('Автоскан'),
-                    selected: sel == -3,
-                    onSelected: (_) {
-                      setState(() => l.followWatch = false);
-                      l.selectRange(-3);
-                    },
                   ),
                 ),
               for (final r in ranges)
@@ -296,6 +297,13 @@ class _LiveTabState extends State<LiveTab> {
                 tooltip: 'Утримання піків',
                 icon: Icon(Icons.vertical_align_top, color: _peak ? Colors.orangeAccent : Colors.white38),
                 onPressed: () => setState(() => _peak = !_peak),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Рівні, палітра, згладжування',
+                icon: const Icon(Icons.palette_outlined),
+                onPressed: () =>
+                    showModalBottomSheet<void>(context: context, builder: (_) => const _SpectrumSettings()),
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
@@ -355,6 +363,8 @@ class _LiveTabState extends State<LiveTab> {
                       hi: v.hi,
                       zoom: l.zoomSpectra[sel],
                       marker: _marker,
+                      vfo: vfo,
+                      vfoBw: vfoBw,
                     ),
                     child: const SizedBox.expand(),
                   );
@@ -513,6 +523,81 @@ class _LiveTabState extends State<LiveTab> {
       setState(() => _highlight = best!.id);
       widget.onSignal(best);
     }
+  }
+}
+
+/// Налаштування спектра/водоспаду: рівні (авто/вручну), палітра, згладжування.
+class _SpectrumSettings extends StatefulWidget {
+  const _SpectrumSettings();
+
+  @override
+  State<_SpectrumSettings> createState() => _SpectrumSettingsState();
+}
+
+class _SpectrumSettingsState extends State<_SpectrumSettings> {
+  void _set(VoidCallback f) {
+    setState(f);
+    SpectrumPrefs.notify();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Спектр і водоспад', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Рівні автоматично'),
+              subtitle: const Text('Від рівня шуму до найсильнішого сигналу'),
+              value: SpectrumPrefs.autoLevels,
+              onChanged: (v) => _set(() => SpectrumPrefs.autoLevels = v),
+            ),
+            if (!SpectrumPrefs.autoLevels) ...[
+              Text('Мінімум (чорне): ${SpectrumPrefs.minDb.round()} дБ'),
+              Slider(
+                value: SpectrumPrefs.minDb,
+                min: -160,
+                max: -20,
+                onChanged: (v) => _set(() => SpectrumPrefs.minDb = math.min(v, SpectrumPrefs.maxDb - 5)),
+              ),
+              Text('Максимум (найяскравіше): ${SpectrumPrefs.maxDb.round()} дБ'),
+              Slider(
+                value: SpectrumPrefs.maxDb,
+                min: -140,
+                max: 0,
+                onChanged: (v) => _set(() => SpectrumPrefs.maxDb = math.max(v, SpectrumPrefs.minDb + 5)),
+              ),
+            ],
+            Text('Згладжування лінії: ${(SpectrumPrefs.smoothing * 100).round()} %'),
+            Slider(
+              value: SpectrumPrefs.smoothing,
+              min: 0,
+              max: 0.9,
+              divisions: 9,
+              onChanged: (v) => _set(() => SpectrumPrefs.smoothing = v),
+            ),
+            const Text('Палітра водоспаду'),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              children: [
+                for (final name in kPalettes.keys)
+                  ChoiceChip(
+                    label: Text(name),
+                    selected: SpectrumPrefs.palette == name,
+                    onSelected: (_) => _set(() => SpectrumPrefs.palette = name),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

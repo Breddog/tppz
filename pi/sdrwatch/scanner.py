@@ -1034,12 +1034,19 @@ class Engine:
         iq = self._read(int(fs * cap))
         self._agc(iq)
         self._watch_n = getattr(self, "_watch_n", 0) + 1
-        if not phone or self._watch_n % 3 == 0:     # спектр — не щокадру, щоб не гальмувати відео
+        auto_w = self.watch_status.get("autoscan")
+        if not phone or self._watch_n % 2 == 0 or auto_w:
+            # Живий спектр того, на що налаштований приймач (як у SDR++/gqrx): ~10 кадрів/с
             s = spectrum.remove_dc(spectrum.psd_db(iq[: d.fft_size * (d.averages + 1)], d.fft_size, d.averages))
             s = s + self.gain_offset_db
             floor = spectrum.local_floor(s)
             freqs = f + (np.arange(len(s)) - len(s) / 2 + 0.5) * fs / len(s)
             self.hub.publish("live", self._spectrum_msg(-1, "Стеження", freqs[0], freqs[-1], s, floor))
+            if auto_w:
+                # Автоскан по сітках: кожен канал — шматок загального спектра «Автоскан» (-3)
+                n = len(s)
+                crop = (n - int(n * self.cfg.sdr.usable_fraction)) // 2
+                self._search_pano_put(auto_w, freqs[crop:n - crop], s[crop:n - crop], floor[crop:n - crop])
 
         info = None
         if phone:

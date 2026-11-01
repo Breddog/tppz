@@ -12,6 +12,7 @@ import 'background.dart';
 import 'device_store.dart';
 import 'notifications.dart';
 import 'screens/home_screen.dart';
+import 'widgets/spectrum_view.dart' show SpectrumPrefs;
 
 /// Стабільний id цього телефону + його ім'я (для режиму «тільки один користувач»).
 Future<void> _initClientId() async {
@@ -32,6 +33,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Notifications.init(requestPermission: true);
   await _initClientId();
+  await SpectrumPrefs.load();
   await NetBind.wifi(); // Wi-Fi без інтернету (модуль/точка доступу) — запити до модуля йдуть через Wi-Fi
   final store = DeviceStore();
   await store.load();

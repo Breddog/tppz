@@ -4,11 +4,30 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models.dart';
 
-/// Палітра водоспаду (темно-синій → блакитний → жовтий → червоний), 256 кольорів RGBA.
-final Uint32List _palette = () {
-  const stops = [
+Uint32List _makePalette(List<List<num>> stops) {
+  final out = Uint32List(256);
+  for (var i = 0; i < 256; i++) {
+    final t = i / 255;
+    var k = 0;
+    while (k < stops.length - 2 && t > stops[k + 1][0]) {
+      k++;
+    }
+    final a = stops[k], b = stops[k + 1];
+    final f = ((t - a[0]) / (b[0] - a[0])).clamp(0.0, 1.0);
+    int ch(int j) => (a[j] + (b[j] - a[j]) * f).round();
+    // RGBA у порядку байтів little-endian: A B G R
+    out[i] = (0xff << 24) | (ch(3) << 16) | (ch(2) << 8) | ch(1);
+  }
+  return out;
+}
+
+/// Палітри водоспаду (як у SDR++ / gqrx).
+final Map<String, Uint32List> kPalettes = {
+  'Класична': _makePalette([
     [0.00, 0x05, 0x07, 0x1a],
     [0.20, 0x10, 0x2a, 0x7a],
     [0.40, 0x00, 0x8f, 0xc8],
@@ -16,30 +35,77 @@ final Uint32List _palette = () {
     [0.78, 0xf5, 0xe1, 0x3b],
     [0.90, 0xff, 0x7b, 0x1c],
     [1.00, 0xff, 0x1d, 0x48],
-  ];
-  final out = Uint32List(256);
-  for (var i = 0; i < 256; i++) {
-    final t = i / 255;
-    var k = 0;
-    while (k < stops.length - 2 && t > (stops[k + 1][0] as double)) {
-      k++;
-    }
-    final a = stops[k], b = stops[k + 1];
-    final f = ((t - (a[0] as double)) / ((b[0] as double) - (a[0] as double))).clamp(0.0, 1.0);
-    int ch(int j) => ((a[j] as int) + ((b[j] as int) - (a[j] as int)) * f).round();
-    // RGBA у порядку байтів little-endian: A B G R
-    out[i] = (0xff << 24) | (ch(3) << 16) | (ch(2) << 8) | ch(1);
+  ]),
+  'Turbo': _makePalette([
+    [0.00, 0x30, 0x12, 0x3b],
+    [0.15, 0x46, 0x6b, 0xe3],
+    [0.30, 0x28, 0xbb, 0xec],
+    [0.45, 0x32, 0xf1, 0x97],
+    [0.60, 0xa4, 0xfc, 0x3c],
+    [0.75, 0xee, 0xcf, 0x3a],
+    [0.88, 0xfb, 0x7e, 0x21],
+    [1.00, 0x7a, 0x04, 0x03],
+  ]),
+  'Сіра': _makePalette([
+    [0.0, 0, 0, 0],
+    [1.0, 255, 255, 255],
+  ]),
+  'Нічна (червона)': _makePalette([
+    [0.0, 0, 0, 0],
+    [0.6, 0x90, 0x10, 0x10],
+    [1.0, 0xff, 0x80, 0x60],
+  ]),
+};
+
+/// Налаштування відображення спектра/водоспаду (спільні для всіх графіків).
+class SpectrumPrefs {
+  static final changed = ValueNotifier<int>(0);
+  static bool autoLevels = true;
+  static double minDb = -120, maxDb = -40;
+  static String palette = 'Класична';
+
+  /// Згладжування лінії спектра 0..0.9 (експоненційне усереднення кадрів).
+  static double smoothing = 0.5;
+
+  static void notify() {
+    changed.value++;
+    save();
   }
-  return out;
-}();
+
+  static Future<void> load() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      autoLevels = p.getBool('sp_auto') ?? true;
+      minDb = p.getDouble('sp_min') ?? -120;
+      maxDb = p.getDouble('sp_max') ?? -40;
+      palette = p.getString('sp_pal') ?? 'Класична';
+      smoothing = p.getDouble('sp_smooth') ?? 0.5;
+      changed.value++;
+    } catch (_) {}
+  }
+
+  static Future<void> save() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool('sp_auto', autoLevels);
+      await p.setDouble('sp_min', minDb);
+      await p.setDouble('sp_max', maxDb);
+      await p.setString('sp_pal', palette);
+      await p.setDouble('sp_smooth', smoothing);
+    } catch (_) {}
+  }
+}
+
+Uint32List get _palette => kPalettes[SpectrumPrefs.palette] ?? kPalettes.values.first;
 
 Color paletteColor(double t) {
   final v = _palette[(t.clamp(0.0, 1.0) * 255).round()];
   return Color.fromARGB(255, v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff);
 }
 
-/// Діапазон шкали дБ: від шуму до найсильнішого піку.
+/// Діапазон шкали дБ: від шуму до найсильнішого піку (або вручну — з налаштувань).
 (double, double) dbRange(SpectrumFrame f) {
+  if (!SpectrumPrefs.autoLevels) return (SpectrumPrefs.minDb, math.max(SpectrumPrefs.maxDb, SpectrumPrefs.minDb + 5));
   final fl = Float32List.fromList(f.floor)..sort();
   final noise = fl.isEmpty ? -110.0 : fl[fl.length ~/ 2];
   var peak = -200.0;
@@ -70,6 +136,8 @@ class SpectrumPainter extends CustomPainter {
     this.hi,
     this.zoom,
     this.marker,
+    this.vfo,
+    this.vfoBw = 0,
     this.repaint,
   }) : super(repaint: repaint);
 
@@ -81,6 +149,10 @@ class SpectrumPainter extends CustomPainter {
   final double? lo, hi;
   final SpectrumFrame? zoom;
   final double? marker;
+
+  /// Поточна частота приймача (відео/звук) і її смуга — як «VFO» у SDR++/gqrx.
+  final double? vfo;
+  final double vfoBw;
   final Listenable? repaint;
 
   static const leftPad = 34.0;
@@ -218,6 +290,20 @@ class SpectrumPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1,
     );
+    if (vfo != null && vfo! >= vLo - vfoBw && vfo! <= vHi + vfoBw) {
+      final x0 = fx(vfo! - vfoBw / 2), x1 = fx(vfo! + vfoBw / 2);
+      canvas.drawRect(
+        Rect.fromLTRB(math.max(leftPad, math.min(x0, x1 - 2)), 0, math.max(x1, x0 + 2), h),
+        Paint()..color = const Color(0x3326C281),
+      );
+      canvas.drawLine(
+        Offset(fx(vfo!), 0),
+        Offset(fx(vfo!), h),
+        Paint()
+          ..color = Colors.greenAccent
+          ..strokeWidth = 1.2,
+      );
+    }
     if (marker != null && marker! >= vLo && marker! <= vHi) {
       final mx = fx(marker!);
       canvas.drawLine(
@@ -300,6 +386,12 @@ class _WaterfallViewState extends State<WaterfallView> {
   void initState() {
     super.initState();
     widget.repaint?.addListener(_update);
+    SpectrumPrefs.changed.addListener(_repaintAll);
+    _update();
+  }
+
+  void _repaintAll() {
+    _px = null;
     _update();
   }
 
@@ -318,6 +410,7 @@ class _WaterfallViewState extends State<WaterfallView> {
 
   @override
   void dispose() {
+    SpectrumPrefs.changed.removeListener(_repaintAll);
     widget.repaint?.removeListener(_update);
     _img?.dispose();
     super.dispose();

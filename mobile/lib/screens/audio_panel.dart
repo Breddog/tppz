@@ -388,9 +388,7 @@ class _AudioPanelState extends State<AudioPanel> {
                 children: [
                   for (final st in const [1e3, 5e3, 6.25e3, 12.5e3, 25e3, 100e3, 1e6])
                     ChoiceChip(
-                      label: Text(
-                        st >= 1e6 ? '1 МГц' : '${(st / 1e3).toString().replaceAll(RegExp(r'\.0$'), '')} кГц',
-                      ),
+                      label: Text(st >= 1e6 ? '1 МГц' : '${(st / 1e3).toString().replaceAll(RegExp(r'\.0$'), '')} кГц'),
                       selected: _step == st,
                       onSelected: (_) => setState(() => _step = st),
                     ),

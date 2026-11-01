@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'widgets/spectrum_view.dart' show SpectrumPrefs;
 
 /// Видима ділянка спектра/водоспаду (масштаб і прокрутка), Гц.
 class ViewWindow {
@@ -204,6 +205,14 @@ class LiveConnection extends ChangeNotifier {
         waterfall.remove(f.range);
         peakHold.remove(f.range);
         zoomSpectra.remove(f.range);
+      }
+    }
+    // Згладжування лінії (як «averaging» у SDR++): лише для того самого вікна частот
+    final a = SpectrumPrefs.smoothing;
+    final p0 = spectra[f.range];
+    if (a > 0 && p0 != null && p0.bins.length == f.bins.length && p0.fStart == f.fStart && p0.fStop == f.fStop) {
+      for (var i = 0; i < f.bins.length; i++) {
+        f.bins[i] = p0.bins[i] * a + f.bins[i] * (1 - a);
       }
     }
     spectra[f.range] = f;
