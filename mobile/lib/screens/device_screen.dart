@@ -246,6 +246,19 @@ class _LiveTabState extends State<LiveTab> {
                     onSelected: (_) => setState(() => l.followWatch = true),
                   ),
                 ),
+              if (l.spectra.containsKey(-3) && l.watch?['autoscan'] != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ChoiceChip(
+                    avatar: const Icon(Icons.autorenew, size: 16),
+                    label: const Text('Автоскан'),
+                    selected: sel == -3,
+                    onSelected: (_) {
+                      setState(() => l.followWatch = false);
+                      l.selectRange(-3);
+                    },
+                  ),
+                ),
               for (final r in ranges)
                 Padding(
                   padding: const EdgeInsets.only(right: 6),

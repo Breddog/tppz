@@ -391,7 +391,9 @@ class _VideoTabState extends State<VideoTab> {
         if (!_started && l.connected) {
           _started = true;
           final cur = (l.watch?['freq_hz'] as num?)?.toDouble() ?? (l.status['watch_freq_hz'] as num?)?.toDouble();
-          if (l.status['mode'] != 'watch') {
+          if (l.audio?['active'] == true) {
+            // Слухаємо звук — не перебивати його автосканом відео
+          } else if (l.status['mode'] != 'watch') {
             if (_autoStart) {
               _autoscan(true); // одразу шукаємо відео по колу всіх сіток
             } else {

@@ -62,6 +62,7 @@ class LiveConnection extends ChangeNotifier {
   String _rangeName(int r) => switch (r) {
     -1 => 'Стеження',
     -2 => 'Звук',
+    -3 => 'Автоскан',
     _ =>
       (((status['ranges'] as List?) ?? const []).cast<Map<String, dynamic>>().firstWhere(
                 (e) => e['index'] == r,
@@ -195,6 +196,16 @@ class LiveConnection extends ChangeNotifier {
       return;
     }
     final first = !spectra.containsKey(f.range);
+    final prev = spectra[f.range];
+    // Кадр з іншої ділянки (стеження перейшло на інший канал, автоскан) — не склеювати водоспад
+    if (prev != null) {
+      final tol = (prev.fStop - prev.fStart) * 0.005;
+      if ((prev.fStart - f.fStart).abs() > tol || (prev.fStop - f.fStop).abs() > tol) {
+        waterfall.remove(f.range);
+        peakHold.remove(f.range);
+        zoomSpectra.remove(f.range);
+      }
+    }
     spectra[f.range] = f;
     final row = Float32List.fromList(f.bins);
     final wf = waterfall.putIfAbsent(f.range, () => []);

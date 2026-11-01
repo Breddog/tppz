@@ -90,7 +90,12 @@ class SpectrumPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final vLo = lo ?? frame.fStart, vHi = hi ?? frame.fStop;
     final z = zoom;
-    final useZoom = z != null && z.fStart <= vLo + (vHi - vLo) * 0.02 && z.fStop >= vHi - (vHi - vLo) * 0.02;
+    // Збільшений кадр — лише свіжий (≤3 с від огляду) і такий, що покриває видиму ділянку
+    final useZoom =
+        z != null &&
+        (frame.ts - z.ts).abs() < 3 &&
+        z.fStart <= vLo + (vHi - vLo) * 0.02 &&
+        z.fStop >= vHi - (vHi - vLo) * 0.02;
     final f = useZoom ? z : frame;
     final (dLo, dHi) = dbRange(frame);
     final w = size.width - leftPad;

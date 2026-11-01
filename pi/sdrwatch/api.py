@@ -65,6 +65,7 @@ class AudioReq(BaseModel):
 class AudioParams(BaseModel):
     squelch_db: float | None = None
     mod: str | None = None
+    freq_hz: float | None = None
 
 
 class TimeReq(BaseModel):
@@ -438,7 +439,7 @@ def create_app(app_state) -> FastAPI:
 
     @app.post("/api/audio/params", dependencies=[Depends(require_control)])
     def audio_params(req: AudioParams):
-        return st.engine.set_audio_params(req.squelch_db, req.mod)
+        return st.engine.set_audio_params(req.squelch_db, req.mod, req.freq_hz)
 
     @app.post("/api/audio/stop", dependencies=[Depends(require_control)])
     def audio_stop():
@@ -592,7 +593,7 @@ def create_app(app_state) -> FastAPI:
                         continue
                     if msg.get("type") == "spectrum":
                         rng = sub.options.get("range")
-                        if rng is not None and msg.get("range") not in (rng, -1):
+                        if rng is not None and msg.get("range") not in (rng, -1, -2, -3):
                             continue
                         # не частіше за fps клієнта (типово 15/с) — інакше телефон «захлинається»
                         key = (msg.get("range"), bool(msg.get("zoom")))

@@ -218,9 +218,15 @@ class Engine:
         self._reconf.set()
         return self.audio_status()
 
-    def set_audio_params(self, squelch_db: float | None = None, mod: str | None = None) -> dict:
+    def set_audio_params(self, squelch_db: float | None = None, mod: str | None = None,
+                         freq_hz: float | None = None) -> dict:
         a = self.audio
         if a:
+            if freq_hz is not None:
+                # Колесо налаштування: у межах ±1 МГц від центру — без перебудови HackRF (миттєво)
+                a["freq_hz"] = float(freq_hz)
+                a["locked"] = True
+                a["scan"] = None
             if squelch_db is not None:
                 a["squelch_db"] = float(squelch_db)
             if mod and mod != a["mod"]:
@@ -387,6 +393,32 @@ class Engine:
                 auto["found"].pop(k, None)
         return e
 
+    def _search_pano_put(self, auto: dict, freqs: np.ndarray, s: np.ndarray, floor: np.ndarray) -> None:
+        """Вікна пошуку складаються в один спектр усього діапазону автоскану (у «Ефірі» — «Автоскан»)."""
+        lo, hi = auto["start_hz"] - self.src.sample_rate / 2, auto["stop_hz"] + self.src.sample_rate / 2
+        bin_hz = float(freqs[1] - freqs[0]) if len(freqs) > 1 else 1e5
+        n = int((hi - lo) / bin_hz)
+        if n <= 0 or n > 2_000_000:
+            return
+        pano = auto.get("pano")
+        if pano is None or len(pano[0]) != n:
+            pano = auto["pano"] = (np.full(n, np.nan, np.float32), np.full(n, np.nan, np.float32), lo, bin_hz)
+        sp, fl, lo0, b = pano
+        a = int((freqs[0] - lo0) / b)
+        k = min(len(s), n - a)
+        if a < 0 or k <= 0:
+            return
+        sp[a:a + k] = s[:k]
+        fl[a:a + k] = floor[:k]
+        now = time.monotonic()
+        if now - auto.get("pano_pub", 0) > 0.25:          # 4 кадри/с — досить для огляду
+            auto["pano_pub"] = now
+            ff = np.where(np.isnan(fl), np.nanmedian(fl) if np.any(~np.isnan(fl)) else -140, fl)
+            msg = self._spectrum_msg(-3, "Автоскан", lo0, lo0 + n * b, np.where(np.isnan(sp), ff, sp), ff,
+                                     FULL_SPECTRUM_POINTS)
+            self.last_spectrum[-3] = msg
+            self.hub.publish("live", msg)
+
     def _search_step(self, auto: dict) -> None:
         """Одне вікно швидкого пошуку (режими «full» / «range»)."""
         d = self.cfg.dsp
@@ -413,8 +445,7 @@ class Engine:
         s = s[crop:n - crop]
         freqs = c + (np.arange(len(s)) - len(s) / 2 + 0.5) * fs / n
         floor = spectrum.local_floor(s)
-        if i % 4 == 0:
-            self.hub.publish("live", self._spectrum_msg(-1, "Пошук", freqs[0], freqs[-1], s, floor))
+        self._search_pano_put(auto, freqs, s, floor)
         for det in spectrum.detect(s, floor, freqs, d.threshold_db, 60e3):
             if det.bandwidth_hz >= 2.5e6:
                 auto["verify"].append((det.freq_hz, det.bandwidth_hz, det.snr_db))
@@ -977,10 +1008,19 @@ class Engine:
                                                       and auto0["last_video"] > 0)
             if not staying:
                 t0 = time.monotonic()
-                while time.monotonic() - t0 < 0.15:       # кілька вікон за крок, але статус — регулярно
+                while time.monotonic() - t0 < 0.12:       # кілька вікон за крок, але статус — регулярно
                     self._search_step(auto0)
                     if time.time() < auto0["dwell_until"]:
                         break
+                if time.time() >= auto0["dwell_until"] and self.hub.count("baseband") > 0:
+                    # Живий кадр на поточній позиції пошуку — екран не «завмирає» між знахідками
+                    fs = self.src.sample_rate
+                    c = auto0.get("pos_hz") or self.watch_freq
+                    self._tune(c)
+                    iq = self._read(int(fs * baseband.FIELD_S))
+                    pkt, _ = baseband.make_packet(iq, fs, c, self.hub.option("baseband", "quality", "normal"))
+                    self.hub.publish("baseband", pkt)
+                    self.watch_freq = c
                 self._publish_watch(auto0, None)
                 return
         fs = self.src.sample_rate

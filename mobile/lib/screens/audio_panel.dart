@@ -10,6 +10,7 @@ import '../api.dart';
 import '../audio/audio_demod.dart';
 import '../live.dart';
 import '../widgets/spectrum_view.dart';
+import '../widgets/tuning.dart';
 
 /// Звук з ефіру: рації, мовлення, авіація. Модуль демодулює, телефон лише програє (24 кГц, моно).
 class AudioPanel extends StatefulWidget {
@@ -50,6 +51,10 @@ class _AudioPanelState extends State<AudioPanel> {
   WebSocketChannel? _ws;
   StreamSubscription? _sub;
   bool _pcmReady = false;
+  double _fHz = 446.00625e6;
+  double _step = 12.5e3;
+  Timer? _tuneT;
+  DateTime _touched = DateTime(2000);
   bool _listening = false;
   int _bytes = 0;
   final _demod = PhoneAudioDemod();
@@ -70,6 +75,7 @@ class _AudioPanelState extends State<AudioPanel> {
     if (hz == null || !mounted) return;
     widget.listenRequest!.value = null;
     _freq.text = (hz / 1e6).toStringAsFixed(5);
+    _fHz = hz;
     _listen();
   }
 
@@ -87,6 +93,7 @@ class _AudioPanelState extends State<AudioPanel> {
 
   @override
   void dispose() {
+    _tuneT?.cancel();
     widget.listenRequest?.removeListener(_onRequest);
     _closeWs();
     FlutterPcmSound.release().catchError((_) {});
@@ -157,9 +164,50 @@ class _AudioPanelState extends State<AudioPanel> {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
   }
 
+  /// Колесо/шкала: змінити частоту; якщо звук увімкнено — перебудувати модуль (не частіше ніж раз на 80 мс).
+  void _setFreq(double hz) {
+    hz = hz.clamp(1e6, 6e9);
+    setState(() {
+      _fHz = hz;
+      _freq.text = (hz / 1e6).toStringAsFixed(5);
+      _touched = DateTime.now();
+    });
+    final active = context.read<LiveConnection>().audio?['active'] == true;
+    if (!active) return;
+    _tuneT?.cancel();
+    _tuneT = Timer(const Duration(milliseconds: 80), () {
+      widget.api.post('/api/audio/params', {'freq_hz': _fHz}).catchError((_) => null);
+    });
+  }
+
+  Future<void> _enterFreq() async {
+    final c = TextEditingController(text: (_fHz / 1e6).toStringAsFixed(5));
+    final v = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Частота, МГц'),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          onSubmitted: (t) => Navigator.pop(ctx, double.tryParse(t.replaceAll(',', '.'))),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Скасувати')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, double.tryParse(c.text.replaceAll(',', '.'))),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (v != null) _setFreq(v * 1e6);
+  }
+
   Future<void> _listen() => _do(() async {
     final mhz = double.tryParse(_freq.text.replaceAll(',', '.'));
     if (mhz == null) throw ApiException('Вкажіть частоту в МГц');
+    _fHz = mhz * 1e6;
     await widget.api.post('/api/audio/start', {'freq_hz': mhz * 1e6, 'mod': _mod, 'squelch_db': _squelch});
     _openWs();
     setState(() => _listening = true);
@@ -191,6 +239,12 @@ class _AudioPanelState extends State<AudioPanel> {
     final l = context.watch<LiveConnection>();
     final a = l.audio ?? const {};
     final active = a['active'] == true;
+    // Автоскан модуля знайшов інший канал — показати (якщо користувач щойно не крутив сам)
+    final mf = (a['freq_hz'] as num?)?.toDouble();
+    if (active && mf != null && (mf - _fHz).abs() > 1 && DateTime.now().difference(_touched).inSeconds > 2) {
+      _fHz = mf;
+      _freq.text = (mf / 1e6).toStringAsFixed(5);
+    }
     final open = a['open'] == true;
     final level = (a['level_db'] as num?)?.toDouble();
     final frame = l.spectra[-2];
@@ -281,24 +335,75 @@ class _AudioPanelState extends State<AudioPanel> {
           ),
         const SizedBox(height: 8),
 
-        // ---- частота й модуляція ----
+        // ---- частота: дисплей, кнопка «звук», лінійка, колесо, крок ----
         Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _freq,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Частота, МГц',
-                  isDense: true,
-                  border: OutlineInputBorder(),
+              child: InkWell(
+                onTap: _enterFreq,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(
+                    '${(_fHz / 1e6).toStringAsFixed(_step < 1e4 ? 4 : 3)} МГц',
+                    style: const TextStyle(
+                      fontSize: 30,
+                      fontWeight: FontWeight.bold,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
                 ),
-                onSubmitted: (_) => _listen(),
               ),
             ),
-            const SizedBox(width: 8),
-            FilledButton.icon(icon: const Icon(Icons.headphones), label: const Text('Слухати'), onPressed: _listen),
+            // Один натиск — звук увімк./вимк.
+            SizedBox(
+              width: 76,
+              height: 76,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  shape: const CircleBorder(),
+                  padding: EdgeInsets.zero,
+                  backgroundColor: active ? Colors.redAccent : Colors.greenAccent.shade700,
+                ),
+                onPressed: active ? _stop : _listen,
+                child: Icon(active ? Icons.volume_off : Icons.volume_up, size: 34),
+              ),
+            ),
           ],
+        ),
+        const SizedBox(height: 6),
+        FrequencyRuler(
+          freqHz: _fHz,
+          stepHz: _step,
+          spanHz: (_step * 80).clamp(100e3, 2.0e6),
+          spectrum: l.spectra[-2],
+          onChanged: _setFreq,
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final st in const [1e3, 5e3, 6.25e3, 12.5e3, 25e3, 100e3, 1e6])
+                    ChoiceChip(
+                      label: Text(
+                        st >= 1e6 ? '1 МГц' : '${(st / 1e3).toString().replaceAll(RegExp(r'\.0$'), '')} кГц',
+                      ),
+                      selected: _step == st,
+                      onSelected: (_) => setState(() => _step = st),
+                    ),
+                ],
+              ),
+            ),
+            TuningKnob(size: 130, onSteps: (n) => _setFreq(_fHz + n * _step)),
+          ],
+        ),
+        const Text(
+          'Тягніть шкалу або крутіть колесо — частота змінюється на крок; дотик до шкали — перейти туди. '
+          'Під шкалою — живий спектр: горби — сигнали.',
+          style: TextStyle(color: Colors.white38, fontSize: 11),
         ),
         const SizedBox(height: 8),
         SegmentedButton<String>(
