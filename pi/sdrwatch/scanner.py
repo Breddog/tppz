@@ -923,8 +923,12 @@ class Engine:
     def _ensure_soapy(self) -> None:
         """Для відео/звуку/перевірки кандидатів потрібен звичайний потік — sweep зупиняємо."""
         self._stop_sweeper()
-        if not self._opened:
+        for attempt in range(3):             # після hackrf_sweep USB звільняється не миттєво
+            if self._opened:
+                break
             self._opened = self._try_open()
+            if not self._opened:
+                time.sleep(0.4)
 
     def _fast_scan_step(self) -> None:
         lo = min(p.start_hz for p in self.panoramas)
@@ -1568,7 +1572,9 @@ class Engine:
     def status(self) -> dict:
         return {
             "mode": self.mode,
-            "sdr_connected": self._opened,
+            # під час швидкого огляду HackRF зайнятий hackrf_sweep — він підключений і працює
+            "sdr_connected": self._opened or (self.sweeper is not None and self.sweeper.alive()),
+            "sdr_error": None if self._opened else self.stats.get("last_error"),
             "watch_freq_hz": self.watch_freq,
             "recording": self.recording,
             "tx": self.tx_status(),

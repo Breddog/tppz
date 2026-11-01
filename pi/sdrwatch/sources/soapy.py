@@ -42,6 +42,7 @@ class SoapySource(SdrSource):
 
         self._soapy = SoapySDR
         self._rx = SOAPY_SDR_RX
+        self.sample_rate = 0.0          # нова сесія плати — частоту дискретизації виставляємо заново
         self.dev = SoapySDR.Device(self.device_args)
         try:
             rng = self.dev.getFrequencyRange(SOAPY_SDR_RX, 0)
@@ -104,12 +105,16 @@ class SoapySource(SdrSource):
         застосовують — тоді плата лишалася на 20 МГц, а звук рахувався як для 2.4 МГц (лише шум).
         Тому: зупинити потік → задати частоту й смугу → перевірити фактичну → запустити потік."""
         rate = min(rate, self.max_sample_rate)
+        if abs(rate - (self.sample_rate or 0)) < 1:
+            return
         active = getattr(self, "stream", None) is not None
+        restarted = False
         if active:
             try:
                 self.dev.deactivateStream(self.stream)
-            except Exception:  # noqa: BLE001
-                active = False
+                restarted = True
+            except Exception as e:  # noqa: BLE001
+                log.warning("deactivateStream: %s", e)
         self.dev.setSampleRate(self._rx, 0, rate)
         try:
             self.dev.setBandwidth(self._rx, 0, rate * 0.9)
@@ -122,9 +127,22 @@ class SoapySource(SdrSource):
         if abs(actual - rate) > rate * 0.01:
             log.warning("Частота дискретизації: просили %.3f МГц, плата дала %.3f МГц", rate / 1e6, actual / 1e6)
         self.sample_rate = actual
-        if active:
-            self.dev.activateStream(self.stream)
-            self._flush(30)          # викинути відліки, що встигли прийти на старій частоті
+        if restarted:
+            try:
+                self.dev.activateStream(self.stream)
+            except Exception as e:  # noqa: BLE001 — потік не запустився: створити заново
+                log.warning("activateStream після зміни частоти: %s — створюю потік заново", e)
+                try:
+                    self.dev.closeStream(self.stream)
+                except Exception:  # noqa: BLE001
+                    pass
+                fmt = "CS8" if getattr(self, "_cs8", False) else self._soapy.SOAPY_SDR_CF32
+                self.stream = self.dev.setupStream(self._rx, fmt)
+                self.dev.activateStream(self.stream)
+            try:
+                self._flush(30)          # викинути відліки, що встигли прийти на старій частоті
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_gain(self, lna: float, vga: float, amp: bool) -> None:
         names = self.dev.listGains(self._rx, 0)

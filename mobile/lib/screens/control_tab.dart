@@ -176,6 +176,16 @@ class _ControlTabState extends State<ControlTab> {
             ),
           ),
           SwitchListTile(
+            title: const Text('Швидкий огляд (sweep прошивки HackRF)'),
+            subtitle: const Text(
+              'Увесь діапазон за частки секунди. Якщо HackRF «зникає» — вимкніть, модуль скануватиме по-старому',
+            ),
+            value: ((c['sdr'] as Map?)?['fast_sweep'] as bool?) ?? true,
+            onChanged: (v) => _patch({
+              'sdr': {'fast_sweep': v},
+            }),
+          ),
+          SwitchListTile(
             title: const Text('Повний діапазон SDR'),
             subtitle: Text(
               full == null

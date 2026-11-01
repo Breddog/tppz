@@ -327,7 +327,9 @@ class _VideoTabState extends State<VideoTab> {
   String _noFrameHint(LiveConnection l) {
     final waited = _wsSince == null ? 0 : DateTime.now().difference(_wsSince!).inSeconds;
     if (l.status['sdr_connected'] == false) {
-      return 'HackRF не підключено до модуля — приймати нічого.\nПеревірте USB-кабель і живлення.';
+      final err = l.status['sdr_error'] ?? (l.status['stats'] as Map?)?['last_error'];
+      return 'Модуль не може відкрити HackRF.\nПеревірте USB-кабель і живлення.'
+          '${err != null && '$err'.isNotEmpty ? '\n\nПричина: $err' : ''}';
     }
     if (waited < 6) return 'Підключення до відеопотоку…';
     return 'Модуль не надсилає відео.\n\nСкоріше за все, на модулі стара прошивка. '
