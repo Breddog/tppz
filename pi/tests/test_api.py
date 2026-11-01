@@ -16,6 +16,7 @@ def client(tmp_path):
     cfg._path = str(tmp_path / "config.json")
     cfg.api.token = "secret"
     cfg.storage.path = str(tmp_path / "st")
+    cfg.tx.allow = True
     st = Storage(cfg.storage.path, 50)
     eng = Engine(cfg, SimulatedSource(), st, None, Hub())
     eng.start()
@@ -270,3 +271,60 @@ def test_ws_baseband_streams_raw_video(tmp_path):
         assert r["autoscan"] and r["channels"] == 8
     finally:
         eng.stop()
+
+
+@pytest.mark.parametrize("mode,extra", [("full", {}), ("range", {"start_hz": 5600e6, "stop_hz": 5950e6})])
+def test_autoscan_search_modes_find_video(tmp_path, mode, extra):
+    import time as _t
+    cfg = Config()
+    cfg._path = str(tmp_path / "config.json")
+    cfg.api.token = "secret"
+    cfg.storage.path = str(tmp_path / "st")
+    hub = Hub()
+    st = Storage(cfg.storage.path, 50)
+    eng = Engine(cfg, SimulatedSource(), st, None, hub)
+    eng.start()
+    try:
+        c = TestClient(create_app(AppState(cfg, eng, st, hub, "sdr-test")))
+        h = {"Authorization": "Bearer secret"}
+        r = c.post("/api/control/video_autoscan", json={"on": True, "mode": mode, "circular": True,
+                                                         "dwell_s": 0.5, **extra}, headers=h).json()
+        assert r["autoscan"] and r["mode"] == mode
+        deadline = _t.time() + 60
+        found = []
+        while _t.time() < deadline:
+            auto = eng.watch_status.get("autoscan") or {}
+            found = [e for e in auto.get("found", {}).values() if e["type"] == "video"]
+            if any(5760 < e["freq_mhz"] < 5780 for e in found):
+                break
+            _t.sleep(0.5)
+        assert any(5760 < e["freq_mhz"] < 5780 for e in found), found
+    finally:
+        eng.stop()
+
+
+def test_audio_iq_channel_for_phone():
+    """Канал для демодуляції на телефоні: 48 кГц (ЧМ вузька/АМ), 240 кГц (ЧМ широка), тон 1 кГц зберігається."""
+    import struct
+
+    import numpy as np
+
+    from sdrwatch.dsp.audio import SDR_RATE, TUNE_OFFSET, AudioDemod, iq_packet
+    from sdrwatch.sources.simulated import Emitter, SimulatedSource
+
+    f = 446e6
+    s = SimulatedSource([Emitter(f, "nfm", power_dbm=-80, bandwidth_hz=20e3)], noise_dbfs=-60)
+    s.set_sample_rate(SDR_RATE)
+    s.set_gain(32, 30, False)
+    s.tune(f + TUNE_OFFSET)
+    d = AudioDemod("nfm")
+    xs = [d.channel(s.read(120000), -TUNE_OFFSET) for _ in range(4)]
+    assert all(r == 48000 for _, r, _ in xs)
+    x = np.concatenate([a for a, _, _ in xs[1:]])
+    fm = np.angle(x[1:] * np.conj(x[:-1]))
+    sp = np.abs(np.fft.rfft((fm - fm.mean()) * np.hanning(len(fm))))
+    fr = np.fft.rfftfreq(len(fm), 1 / 48000)
+    assert abs(fr[np.argmax(sp[5:]) + 5] - 1000) < 20
+    pkt = iq_packet(xs[1][0], 48000, f, "nfm", 25.0, 10.0, True)
+    magic, ver, mode, flags, freq, rate, scale, lvl, sq, n = struct.unpack_from("<4sBBHdffffI", pkt)
+    assert magic == b"SDRA" and n == len(xs[1][0]) and flags == 1 and len(pkt) == 36 + 4 * n

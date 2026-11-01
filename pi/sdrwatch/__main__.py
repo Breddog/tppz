@@ -55,9 +55,13 @@ def cmd_run(args) -> None:
         cfg.api.port = args.port
     storage = Storage(cfg.storage.path, cfg.storage.quota_mb)
     hub = Hub()
-    notifier = Notifier(cfg.notify, cfg.name)
-    src = create_source(cfg.sdr)
-    engine = Engine(cfg, src, storage, notifier, hub)
+    overrides = {"sdr": {"driver": cfg.sdr.driver}, "storage": {"path": cfg.storage.path}}
+    if os.environ.get("SDRWATCH_SINGLE_PROCESS"):
+        engine = Engine(cfg, create_source(cfg.sdr), storage, Notifier(cfg.notify, cfg.name), hub)
+    else:
+        # Обробка сигналу — в окремому процесі (окреме ядро Pi), веб-сервер не гальмує
+        from .engine_proc import EngineProxy
+        engine = EngineProxy(cfg, hub, overrides)
     engine.start()
     dev_id = device_id_for(cfg)
     app = create_app(AppState(cfg, engine, storage, hub, dev_id))
@@ -72,7 +76,7 @@ def cmd_run(args) -> None:
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
-    logging.info("SDR Watch %s: API на порту %d, приймач %s", __version__, cfg.api.port, src.name)
+    logging.info("SDR Watch %s: API на порту %d, приймач %s", __version__, cfg.api.port, cfg.sdr.driver)
     try:
         uvicorn.run(app, host=cfg.api.host, port=cfg.api.port, log_level="warning")
     finally:

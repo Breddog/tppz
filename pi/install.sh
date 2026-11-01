@@ -26,6 +26,12 @@ id sdrwatch >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -G plugdev sdrwat
 getent group gpio >/dev/null && usermod -aG gpio sdrwatch || true
 usermod -aG netdev sdrwatch 2>/dev/null || true
 
+echo "==> Дозвіл виставляти годинник за часом телефона (у Pi немає годинника з батарейкою)"
+cat > /etc/sudoers.d/sdrwatch-time <<'S'
+sdrwatch ALL=(root) NOPASSWD: /usr/bin/date -u -s @*
+S
+chmod 440 /etc/sudoers.d/sdrwatch-time
+
 echo "==> Дозвіл керувати Wi-Fi/мережею з застосунку (polkit для сервісу)"
 mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/50-sdrwatch-nm.rules <<'P'

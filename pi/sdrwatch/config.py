@@ -78,6 +78,30 @@ class DistanceConfig:
 
 
 @dataclass
+class AntennaConfig:
+    """Антена, що стоїть на модулі. Враховується у відстані, рівнях і підказках."""
+    name: str = "Штатна (невідома)"
+    kind: str = "omni"          # omni | directional | panel | yagi | helix
+    cable_loss_db: float = 0.0
+    # Робочі діапазони з підсиленням: [{"start_mhz": 5650, "stop_mhz": 5950, "gain_dbi": 3}]
+    # Порожньо — вважаємо підсилення distance.rx_antenna_gain_dbi на всіх частотах
+    bands: list = field(default_factory=list)
+    notes: str = ""
+
+    def gain_at(self, freq_hz: float, default_dbi: float) -> tuple[float, bool]:
+        """(підсилення з урахуванням кабелю, чи частота в робочому діапазоні антени)."""
+        mhz = freq_hz / 1e6
+        for b in self.bands or []:
+            try:
+                if float(b["start_mhz"]) <= mhz <= float(b["stop_mhz"]):
+                    return float(b.get("gain_dbi", default_dbi)) - self.cable_loss_db, True
+            except (KeyError, TypeError, ValueError):
+                continue
+        # Поза робочими діапазонами антена приймає значно гірше (типово −10 дБ)
+        return default_dbi - self.cable_loss_db - (10.0 if self.bands else 0.0), not self.bands
+
+
+@dataclass
 class StorageConfig:
     path: str = "/var/lib/sdrwatch"
     # Скільки місця на флешці виділити під кільцевий запис (як у відеореєстраторі)
@@ -98,6 +122,10 @@ class NotifyConfig:
     webhook_url: str = ""
     # Не повторювати сповіщення про ту саму частоту частіше ніж раз на N секунд
     cooldown_s: float = 120.0
+    # Які класи повідомляти (порожньо — усі з потрібним пріоритетом), напр. ["analog_video", "control_link"]
+    classes: list = field(default_factory=list)
+    # Не повідомляти про сигнали слабші за цей рівень, дБм (None — без обмеження)
+    min_rssi_dbm: float | None = None
 
 
 @dataclass
@@ -122,7 +150,7 @@ class UpdateConfig:
 @dataclass
 class TxConfig:
     # Тестовий передавач. Дозвіл має увімкнути власник (правова відповідальність за ефір).
-    allow: bool = True
+    allow: bool = False
     # Передавач сам вимикається через стільки секунд (захист від «забув вимкнути»)
     max_seconds: float = 300.0
     # Підсилення передачі за замовчуванням (HackRF VGA 0..47 дБ). Починайте з малого!
@@ -140,6 +168,7 @@ class Config:
     dsp: DspConfig = field(default_factory=DspConfig)
     full_band: FullBandConfig = field(default_factory=FullBandConfig)
     distance: DistanceConfig = field(default_factory=DistanceConfig)
+    antenna: AntennaConfig = field(default_factory=AntennaConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     api: ApiConfig = field(default_factory=ApiConfig)

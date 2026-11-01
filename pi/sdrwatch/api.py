@@ -8,7 +8,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+import struct
 import time
+
+import numpy as np
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -64,11 +67,21 @@ class AudioParams(BaseModel):
     mod: str | None = None
 
 
+class TimeReq(BaseModel):
+    ts: float
+    lat: float | None = None
+    lon: float | None = None
+
+
 class VideoAutoscanReq(BaseModel):
     on: bool
     bands: list[str] | None = None
     circular: bool = True
-    dwell_s: float = 4.0
+    dwell_s: float = 3.0
+    mode: str = "grids"            # grids | full | range
+    start_hz: float | None = None
+    stop_hz: float | None = None
+    audio: bool = True             # шукати й голос (вузькі сигнали < 1.3 ГГц)
 
 
 class WifiReq(BaseModel):
@@ -108,6 +121,9 @@ def create_app(app_state) -> FastAPI:
 
     app.state.pairing_open = lambda: pairing_left() > 0
     updater = Updater(st.cfg.storage.path, st.cfg.updates.repo)
+    from .health import Health
+    health = Health(st.cfg.storage.path)
+    health.start(st.hub)
 
     def check_token(token: str | None) -> None:
         if not token or not hmac.compare_digest(token, st.cfg.api.token):
@@ -221,22 +237,48 @@ def create_app(app_state) -> FastAPI:
                 "location": {"lat": st.cfg.latitude, "lon": st.cfg.longitude},
                 **st.engine.status(), "storage": st.storage.usage()}
 
+    @app.get("/api/health", dependencies=[Depends(auth)])
+    def get_health():
+        """Стан модуля: температура/навантаження ЦП, живлення, пам'ять, флешка + історія за годину."""
+        return health.report()
+
+    @app.post("/api/time", dependencies=[Depends(auth)])
+    def set_time(req: TimeReq):
+        """Телефон передає свій час і координати: у Pi немає годинника з батарейкою, а GPS — у телефоні."""
+        drift = req.ts - time.time()
+        fixed = False
+        if abs(drift) > 30:
+            import subprocess
+            try:
+                fixed = subprocess.run(["sudo", "-n", "/usr/bin/date", "-u", "-s", f"@{int(req.ts)}"],
+                                       capture_output=True, timeout=5).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                fixed = False
+        if req.lat is not None and req.lon is not None:
+            moved = st.cfg.latitude is None or abs((st.cfg.latitude or 0) - req.lat) + abs(
+                (st.cfg.longitude or 0) - req.lon) > 0.0005
+            st.cfg.latitude, st.cfg.longitude = round(req.lat, 6), round(req.lon, 6)
+            if moved:
+                try:
+                    st.cfg.save()
+                except OSError:
+                    pass
+        return {"drift_s": round(drift, 1), "clock_fixed": fixed}
+
     @app.get("/api/signals", dependencies=[Depends(auth)])
     def signals():
         return {"signals": st.engine.signals(), "ts": time.time()}
 
     @app.get("/api/signals/{track_id}", dependencies=[Depends(auth)])
     def signal(track_id: str):
-        t = st.engine.tracker.tracks.get(track_id)
-        if not t:
+        d = st.engine.signal_detail(track_id)
+        if not d:
             raise HTTPException(404, "Сигнал не знайдено")
-        d = t.to_dict()
-        d["rssi_history"] = list(t.rssi_history)
         return d
 
     @app.get("/api/spectrum", dependencies=[Depends(auth)])
     def last_spectrum():
-        return {"spectra": list(st.engine.last_spectrum.values())}
+        return {"spectra": [jsonable(m) for m in st.engine.last_spectrum.values()]}
 
     @app.get("/api/channels", dependencies=[Depends(auth)])
     def channels():
@@ -405,7 +447,8 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/control/video_autoscan", dependencies=[Depends(require_control)])
     def video_autoscan(req: VideoAutoscanReq):
         try:
-            return st.engine.set_video_autoscan(req.on, req.bands, req.circular, req.dwell_s)
+            return st.engine.set_video_autoscan(req.on, req.bands, req.circular, req.dwell_s, req.mode,
+                                                req.start_hz, req.stop_hz, req.audio)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
@@ -488,7 +531,7 @@ def create_app(app_state) -> FastAPI:
     # ---- віддалене оновлення (ПЗ модуля, прошивка HackRF) ---------------------------------------
     @app.get("/api/update", dependencies=[Depends(auth)])
     def update_status():
-        sdr = st.engine.src.info()
+        sdr = st.engine.sdr_info()
         return {"sdrwatch_version": __version__, "build": updater.installed_build(),
                 "hackrf_firmware": sdr.get("firmware"), "rx_only_firmware": sdr.get("rx_only_firmware"),
                 "sdr": sdr.get("name"), "status": updater.status()}
@@ -524,7 +567,8 @@ def create_app(app_state) -> FastAPI:
 
     # ---- WebSocket: живий спектр/водоспад, сигнали, події -------------------------------------------
     @app.websocket("/ws/live")
-    async def ws_live(ws: WebSocket, token: str | None = None):
+    async def ws_live(ws: WebSocket, token: str | None = None, binary: int = 0):
+        """Живі дані. binary=1 — кадри спектра бінарні (див. spectrum_bytes), решта — JSON."""
         try:
             check_token(token)
         except HTTPException:
@@ -533,10 +577,12 @@ def create_app(app_state) -> FastAPI:
         await ws.accept()
         sub = st.hub.subscribe("live", maxsize=64)
         try:
-            await ws.send_json({"type": "hello", "status": st.engine.status(), "signals": st.engine.signals()})
+            await ws.send_json({"type": "hello", "status": st.engine.status(), "signals": st.engine.signals(),
+                                "health": health.current})
             for m in list(st.engine.last_spectrum.values()):
-                await ws.send_json(m)
+                await (ws.send_bytes(spectrum_bytes(m)) if binary else ws.send_json(jsonable(m)))
             recv = asyncio.create_task(_client_opts(ws, sub))
+            last_sent: dict = {}
             try:
                 while True:
                     try:
@@ -544,10 +590,20 @@ def create_app(app_state) -> FastAPI:
                     except asyncio.TimeoutError:
                         await ws.send_json({"type": "ping", "ts": time.time()})
                         continue
-                    rng = sub.options.get("range")
-                    if msg.get("type") == "spectrum" and rng is not None and msg.get("range") not in (rng, -1):
-                        continue
-                    await ws.send_json(msg)
+                    if msg.get("type") == "spectrum":
+                        rng = sub.options.get("range")
+                        if rng is not None and msg.get("range") not in (rng, -1):
+                            continue
+                        # не частіше за fps клієнта (типово 15/с) — інакше телефон «захлинається»
+                        key = (msg.get("range"), bool(msg.get("zoom")))
+                        now = time.monotonic()
+                        if now - last_sent.get(key, 0) < 1 / float(sub.options.get("fps") or 15):
+                            continue
+                        last_sent[key] = now
+                        if binary:
+                            await ws.send_bytes(spectrum_bytes(msg))
+                            continue
+                    await ws.send_json(jsonable(msg))
             finally:
                 recv.cancel()
         except (WebSocketDisconnect, RuntimeError):
@@ -604,6 +660,29 @@ def create_app(app_state) -> FastAPI:
         finally:
             st.hub.unsubscribe(sub)
 
+    @app.websocket("/ws/audioiq")
+    async def ws_audioiq(ws: WebSocket, token: str | None = None):
+        """Вузька смуга звукового каналу (див. dsp/audio.py iq_packet) — демодулює телефон."""
+        try:
+            check_token(token)
+        except HTTPException:
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        sub = st.hub.subscribe("audioiq", maxsize=6)
+        try:
+            while True:
+                try:
+                    pkt = await asyncio.wait_for(sub.q.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    await ws.send_json({"type": "ping"})
+                    continue
+                await ws.send_bytes(pkt)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            st.hub.unsubscribe(sub)
+
     @app.websocket("/ws/audio")
     async def ws_audio(ws: WebSocket, token: str | None = None):
         """Звук: бінарні блоки PCM 16-біт LE моно 24 кГц (лише коли відкритий шумодав)."""
@@ -634,13 +713,38 @@ def create_app(app_state) -> FastAPI:
     return app
 
 
+SPEC_HEADER = struct.Struct("<4sBBhdddfI")
+
+
+def spectrum_bytes(m: dict) -> bytes:
+    """Бінарний кадр спектра: заголовок + int16 (дБ×10) рівні + int16 шум. У ~6 разів менше за JSON.
+
+    magic b"SPEC", ver 1, flags (bit0 — збільшена ділянка), range i16, f_start f64, f_stop f64,
+    ts f64, threshold f32, n u32; далі n×int16 bins, n×int16 floor.
+    """
+    bins = np.asarray(m["bins"], dtype=np.float32)
+    floor = np.asarray(m["floor"], dtype=np.float32)
+    head = SPEC_HEADER.pack(b"SPEC", 1, 1 if m.get("zoom") else 0, int(m["range"]), float(m["f_start"]),
+                            float(m["f_stop"]), float(m["ts"]), float(m.get("threshold_db", 8.0)), len(bins))
+    q = lambda a: np.clip(np.round(a * 10), -32000, 32000).astype("<i2").tobytes()  # noqa: E731
+    return head + q(bins) + q(floor)
+
+
+def jsonable(m: dict) -> dict:
+    if isinstance(m.get("bins"), np.ndarray):
+        m = {**m, "bins": np.round(m["bins"], 1).tolist(), "floor": np.round(m["floor"], 1).tolist()}
+    return m
+
+
 async def _client_opts(ws: WebSocket, sub) -> None:
     """Клієнт може надіслати {"range": N} — отримувати спектр лише одного діапазону."""
     try:
         while True:
             m = await ws.receive_json()
-            if isinstance(m, dict) and "range" in m:
-                sub.options["range"] = m["range"]
+            if isinstance(m, dict):
+                for k in ("range", "zoom", "fps"):
+                    if k in m:
+                        sub.options[k] = m[k]
     except Exception:  # noqa: BLE001 — з'єднання закрито
         return
 

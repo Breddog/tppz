@@ -29,6 +29,11 @@ class Notifier:
         cls = track.get("class") or {}
         if not c.enabled or cls.get("priority", 0) < c.min_priority or kind not in ("new", "reacquired", "changed"):
             return False
+        if c.classes and cls.get("code") not in c.classes:
+            return False
+        rssi = track.get("rssi_dbm")
+        if c.min_rssi_dbm is not None and rssi is not None and rssi < c.min_rssi_dbm:
+            return False
         key = f"{cls.get('code')}:{round(track.get('freq_hz', 0) / 5e6)}"
         now = time.time()
         if now - self.last_sent.get(key, 0) < c.cooldown_s:

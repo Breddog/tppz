@@ -282,18 +282,29 @@ class Engine:
                 a["center"] = a["freq_hz"] + au.TUNE_OFFSET
             self._tune(a["center"])
             a["tuned"] = a["center"]
-        iq = self._read(int(au.SDR_RATE * 0.1))
-        pcm, _ = a["demod"].process(iq, a["freq_hz"] - a["center"])
+        # Блоки по 50 мс — менша затримка звуку
+        iq = self._read(int(au.SDR_RATE * 0.05))
         lvl = au.window_peaks(iq[:32768], a["center"], 1.0, a["freq_hz"], a["freq_hz"], -999.0)
         a["level_db"] = round(lvl[0][1], 1) if lvl else None
         a["open"] = a["level_db"] is not None and a["level_db"] >= a["squelch_db"]
+        if self.hub.count("audioiq") > 0:
+            # Телефон демодулює сам: віддаємо лише вирізаний канал (48 / 240 кГц)
+            x, rate, _ = a["demod"].channel(iq, a["freq_hz"] - a["center"])
+            self.hub.publish("audioiq", au.iq_packet(x, rate, a["freq_hz"], a["mod"], a["level_db"],
+                                                     a["squelch_db"], a["open"]))
         if a["open"]:
             a["last_open"] = now
-            self.hub.publish("audio", pcm.tobytes())
+            if self.hub.count("audio") > 0:      # старі застосунки / веб — готовий звук з модуля
+                pcm, _ = a["demod"].process(iq, a["freq_hz"] - a["center"])
+                self.hub.publish("audio", pcm.tobytes())
         elif sc and now - a["last_open"] > sc["hold_s"]:
             a["locked"] = False            # сигнал зник — продовжуємо автоскан з наступного вікна
             a["center"] += 2.0e6
-        # Живий спектр навколо частоти (2.4 МГц)
+        # Живий спектр навколо частоти (2.4 МГц) — раз на 4 блоки
+        a["n"] = a.get("n", 0) + 1
+        if a["n"] % 4:
+            self.hub.publish("live", {"type": "audio", **self.audio_status(), "ts": now})
+            return
         d = self.cfg.dsp
         spec = spectrum.remove_dc(spectrum.psd_db(iq[: d.fft_size * (d.averages + 1)], d.fft_size, d.averages))
         spec = spec + self.gain_offset_db
@@ -307,31 +318,121 @@ class Engine:
             self.src.set_sample_rate(self.cfg.sdr.sample_rate)
 
     def set_video_autoscan(self, on: bool, bands: list[str] | None = None, circular: bool = True,
-                           dwell_s: float = 4.0) -> dict:
-        """Автоскан відео: перебирати аналогові канали, зупинятися на картинці."""
+                           dwell_s: float = 3.0, mode: str = "grids", start_hz: float | None = None,
+                           stop_hz: float | None = None, audio: bool = True) -> dict:
+        """Круговий автоскан відео (+ пошук голосу).
+
+        mode: «grids» — канали вибраних сіток; «full» — весь діапазон SDR; «range» — від start до stop.
+        Іде по порядку, коло за колом. Знайдене відео показує dwell_s секунд (circular) або стоїть на ньому.
+        Повний діапазон і «від–до» — двоступенево: швидкий спектр вікнами по ~16 МГц, перевірка
+        синхроімпульсів лише там, де є широкий сигнал. Вузькі сигнали (<1.3 ГГц) — кандидати голосу.
+        """
         if not on:
             if self.watch_status:
                 self.watch_status.pop("autoscan", None)
             return {"autoscan": False}
-        codes = bands or ["R", "F", "A", "B", "E"]
+        info = self.src.info() if self._opened else {}
+        lo_dev = float(info.get("min_freq_hz") or 1e6)
+        hi_dev = float(info.get("max_freq_hz") or 6e9)
+        fs = self.src.sample_rate or self.cfg.sdr.sample_rate
+        step = fs * self.cfg.sdr.usable_fraction
         freqs: list[float] = []
-        for code in codes:
-            b = ch.BAND_BY_CODE.get(code)
-            if not b:
-                continue
-            for c in b.channels():
-                if all(abs(c.freq_hz - f) > 2e6 for f in freqs):
-                    freqs.append(c.freq_hz)
-        freqs.sort()
+        if mode == "grids":
+            for code in bands or ["R", "F", "A", "B", "E"]:
+                b = ch.BAND_BY_CODE.get(code)
+                if not b:
+                    continue
+                for c in b.channels():
+                    if all(abs(c.freq_hz - f) > 2e6 for f in freqs):
+                        freqs.append(c.freq_hz)
+            freqs.sort()
+        else:
+            lo = max(lo_dev, float(start_hz) if (mode == "range" and start_hz) else lo_dev)
+            hi = min(hi_dev, float(stop_hz) if (mode == "range" and stop_hz) else hi_dev)
+            if hi - lo < 1e6:
+                raise ValueError("Діапазон «від–до» замалий")
+            f = lo + step / 2
+            while f - step / 2 < hi:
+                freqs.append(min(f, hi_dev - fs / 2))
+                f += step
         if not freqs:
             raise ValueError("Немає каналів для автоскану")
         if self.mode != "watch":
             self.set_mode("watch", freqs[0])
-        self.watch_status["autoscan"] = {"freqs": freqs, "idx": 0, "found": {}, "last_video": 0.0,
-                                         "circular": bool(circular), "dwell_s": float(dwell_s),
-                                         "arrived": time.time(), "rounds": 0}
+        old = (self.watch_status or {}).get("autoscan") or {}
+        self.watch_status["autoscan"] = {
+            "mode": mode, "freqs": freqs, "idx": 0, "found": old.get("found", {}), "last_video": 0.0,
+            "circular": bool(circular), "dwell_s": float(dwell_s), "arrived": time.time(), "rounds": 0,
+            "audio": bool(audio), "start_hz": freqs[0], "stop_hz": freqs[-1], "dwell_until": 0.0,
+            "verify": [], "round_started": time.time(), "round_s": None, "pos_hz": freqs[0],
+        }
         self.watch_freq = freqs[0]
-        return {"autoscan": True, "channels": len(freqs)}
+        return {"autoscan": True, "channels": len(freqs), "mode": mode}
+
+    def _found_add(self, auto: dict, kind: str, f: float, level: float, extra: dict | None = None) -> dict:
+        m0 = ch.match_channel(f, kind="analog") if kind == "video" else None
+        if kind == "video":
+            key = m0.channel.name if m0 else f"V{f / 1e6:.0f}"
+        else:
+            key = f"A{round(f / 12.5e3) * 12.5e3 / 1e6:.4f}"
+        e = auto["found"].get(key)
+        now = time.time()
+        if e is None:
+            e = auto["found"][key] = {"key": key, "type": kind, "freq_mhz": round(f / 1e6, 4 if kind == "audio" else 1),
+                                      "channel": m0.channel.name if m0 else None, "first_seen": now, "hits": 0}
+        e.update({"last_seen": now, "level_db": round(level, 1), **(extra or {})})
+        e["hits"] += 1
+        if len(auto["found"]) > 200:   # найстаріші — геть
+            for k in sorted(auto["found"], key=lambda k: auto["found"][k]["last_seen"])[:20]:
+                auto["found"].pop(k, None)
+        return e
+
+    def _search_step(self, auto: dict) -> None:
+        """Одне вікно швидкого пошуку (режими «full» / «range»)."""
+        d = self.cfg.dsp
+        fs = self.src.sample_rate
+        if auto["verify"]:
+            # Перевірка кандидата: чи є рядкова синхронізація (тобто аналогове відео)
+            f, bw, lvl = auto["verify"].pop(0)
+            self._tune(f)
+            iq = self._read(int(fs * baseband.FIELD_S))
+            pkt, info = baseband.make_packet(iq, fs, f, self.hub.option("baseband", "quality", "normal"))
+            if info["is_video"]:
+                self.hub.publish("baseband", pkt)
+                self._found_add(auto, "video", f + info["afc_offset_hz"], lvl, {"standard": info["standard"]})
+                self.watch_freq = f + info["afc_offset_hz"]
+                auto["dwell_until"] = time.time() + auto["dwell_s"]
+                auto["last_video"] = time.time()
+            return
+        i = auto["idx"]
+        c = auto["freqs"][i]
+        auto["pos_hz"] = c
+        s, _ = self._capture_spectrum(c)
+        n = len(s)
+        crop = (n - int(n * self.cfg.sdr.usable_fraction)) // 2
+        s = s[crop:n - crop]
+        freqs = c + (np.arange(len(s)) - len(s) / 2 + 0.5) * fs / n
+        floor = spectrum.local_floor(s)
+        if i % 4 == 0:
+            self.hub.publish("live", self._spectrum_msg(-1, "Пошук", freqs[0], freqs[-1], s, floor))
+        for det in spectrum.detect(s, floor, freqs, d.threshold_db, 60e3):
+            if det.bandwidth_hz >= 2.5e6:
+                auto["verify"].append((det.freq_hz, det.bandwidth_hz, det.snr_db))
+        if auto["audio"] and c < 1.35e9:
+            # Вузькі сигнали (рації, голос): піки шириною 1–3 біни, помітно вище шуму
+            bin_hz = fs / n
+            exc = s - floor
+            for k in np.flatnonzero((exc > d.threshold_db + 4) & (exc >= np.roll(exc, 1)) & (exc >= np.roll(exc, -1))):
+                if 2 <= k < len(s) - 2 and np.sum(exc[k - 2:k + 3] > d.threshold_db) <= 3:
+                    f = float(freqs[k])
+                    if abs(f - c) > 3 * bin_hz:                 # не DC-пік HackRF
+                        self._found_add(auto, "audio", f, float(exc[k]))
+        auto["idx"] = (i + 1) % len(auto["freqs"])
+        if auto["idx"] == 0:
+            now = time.time()
+            auto["rounds"] += 1
+            auto["round_s"] = round(now - auto["round_started"], 2)
+            auto["round_started"] = now
 
     def start_transmit(self, mode: str, freq_hz: float, gain_db: float | None = None,
                        standard: str | None = None, image: np.ndarray | None = None,
@@ -587,6 +688,13 @@ class Engine:
 
     def _read(self, n: int) -> np.ndarray:
         iq = self.src.read(n)
+        # Сторожовий таймер: HackRF іноді «зависає» по USB і віддає нулі — перепідключаємо
+        now = time.time()
+        if len(iq) and np.any(iq[:256]):
+            self._last_good = now
+        elif now - getattr(self, "_last_good", now) > 5.0:
+            self._last_good = now
+            raise RuntimeError("HackRF не дає даних 5 с — перепідключення")
         # Конвертер із гетеродином вище сигналу дзеркалить спектр — повертаємо як в ефірі
         return np.conj(iq) if self.fe.inverted else iq
 
@@ -755,8 +863,10 @@ class Engine:
         dc = self.cfg.distance
         # Тренд рахуємо лише після 8 с спостереження — інакше він шумить
         slope = t.rssi_slope if (t.last_seen - t.first_seen > 8 and not t.fhss_key) else 0.0
+        gain, in_band = self.cfg.antenna.gain_at(t.freq_hz, dc.rx_antenna_gain_dbi)
         t.distance = dist.estimate(t.classification.code, t.freq_hz, t.rssi_smooth, slope,
-                                   dc.path_loss_exponent, dc.rx_antenna_gain_dbi).to_dict()
+                                   dc.path_loss_exponent, gain).to_dict()
+        t.distance["antenna_in_band"] = in_band
 
     def _record_auto_clip(self, t: Track, event_id: int) -> None:
         """Короткий кліп одразу після виявлення відео — для перегляду в історії."""
@@ -860,6 +970,19 @@ class Engine:
 
     # ---- стеження / живе відео ------------------------------------------------------------
     def _watch_step(self) -> None:
+        auto0 = self.watch_status.get("autoscan")
+        if auto0 and auto0.get("mode") in ("full", "range"):
+            now = time.time()
+            staying = now < auto0["dwell_until"] or (not auto0["circular"] and now - auto0["last_video"] < 1.0
+                                                      and auto0["last_video"] > 0)
+            if not staying:
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < 0.15:       # кілька вікон за крок, але статус — регулярно
+                    self._search_step(auto0)
+                    if time.time() < auto0["dwell_until"]:
+                        break
+                self._publish_watch(auto0, None)
+                return
         fs = self.src.sample_rate
         d = self.cfg.dsp
         f = self.watch_freq
@@ -911,32 +1034,37 @@ class Engine:
         now = time.time()
         manual = st.get("manual", False)   # ручне сканування повзунком — без «полювання»
         auto = st.get("autoscan")
-        if auto:
+        if auto and auto.get("mode", "grids") == "grids":
             arrived = auto.setdefault("arrived", now)
             nxt = False
             if res.is_video:
                 auto["last_video"] = now
-                m0 = ch.match_channel(f, kind="analog")
-                key = m0.channel.name if m0 else f"{f / 1e6:.0f}"     # групуємо за каналом (AFC трохи «гуляє»)
-                auto["found"][key] = round(f / 1e6, 1)
+                self._found_add(auto, "video", f, float(vinfo.get("snr_db") or 0),
+                                {"standard": vinfo.get("standard")})
                 # Круговий режим: показати картинку dwell_s і йти далі по колу; інакше стояти, поки є відео
-                nxt = auto.get("circular") and now - arrived > auto.get("dwell_s", 4.0)
-            elif now - max(auto["last_video"], arrived) > auto.get("empty_s", 0.35):
+                nxt = auto.get("circular") and now - arrived > auto.get("dwell_s", 3.0)
+            elif now - max(auto["last_video"], arrived) > auto.get("empty_s", 0.3):
                 nxt = True    # порожній канал — далі (час на канал ≈ кілька полів відео)
             if nxt:
                 auto["idx"] = (auto["idx"] + 1) % len(auto["freqs"])
                 if auto["idx"] == 0:
                     auto["rounds"] = auto.get("rounds", 0) + 1
+                    auto["round_s"] = round(now - auto.get("round_started", now), 2)
+                    auto["round_started"] = now
                 auto["arrived"] = now
                 auto["last_video"] = 0.0
                 self.watch_freq = auto["freqs"][auto["idx"]]
+                auto["pos_hz"] = self.watch_freq
+        elif auto and res.is_video:
+            auto["last_video"] = now          # пошук «full/range» стоїть на знайденому відео
+            self._found_add(auto, "video", f, float(vinfo.get("snr_db") or 0), {"standard": vinfo.get("standard")})
         if res.is_video:
             st["lost_since"] = None
             st["hunt"] = None
             if self.video_opts["afc"] and abs(res.afc_offset_hz) > 150e3:
                 # Плавне доналаштування на відео (AFC) — не більше 1 МГц за крок
                 self.watch_freq = f + float(np.clip(res.afc_offset_hz * 0.4, -1e6, 1e6))
-        elif not manual:
+        elif not manual and not auto:
             st["lost_since"] = st.get("lost_since") or now
             # Сигнал зник більше ніж на 2 с — шукаємо по сітці каналів (лише у режимі стеження за сигналом)
             if now - st["lost_since"] > 2.0:
@@ -951,15 +1079,26 @@ class Engine:
                     self.watch_freq = found.freq_hz
                     st["lost_since"] = None
                     st["hunt"] = None
+        self._publish_watch(auto, vinfo)
+
+    def _publish_watch(self, auto: dict | None, vinfo: dict | None) -> None:
+        st = self.watch_status
+        now = time.time()
+        if vinfo is None:
+            vinfo = {"is_video": False, "searching": True}
         m = ch.match_channel(self.watch_freq, kind="analog")
+        found = sorted(auto["found"].values(), key=lambda e: e["freq_mhz"]) if auto else []
         self.hub.publish("live", {
             "type": "watch", "freq_hz": round(self.watch_freq), "video": vinfo,
             "channel": m.to_dict() if m else None, "recording": self.recording,
-            "manual": manual, "searching": bool(st.get("hunt")), "ts": now,
-            "autoscan": ({"index": auto["idx"], "total": len(auto["freqs"]),
+            "manual": st.get("manual", False), "searching": bool(st.get("hunt")), "ts": now,
+            "autoscan": ({"mode": auto.get("mode", "grids"), "index": auto["idx"], "total": len(auto["freqs"]),
                           "circular": bool(auto.get("circular")), "rounds": auto.get("rounds", 0),
-                          "dwell_s": auto.get("dwell_s", 4.0),
-                          "found": [{"channel": k, "freq_mhz": v} for k, v in auto["found"].items()]}
+                          "dwell_s": auto.get("dwell_s", 3.0), "round_s": auto.get("round_s"),
+                          "pos_hz": round(auto.get("pos_hz") or self.watch_freq),
+                          "start_hz": auto.get("start_hz"), "stop_hz": auto.get("stop_hz"),
+                          "dwelling": now < auto.get("dwell_until", 0), "audio": auto.get("audio", True),
+                          "found": [{**e, "channel": e.get("channel") or e["key"]} for e in found]}
                          if auto else None),
         })
 
@@ -971,15 +1110,32 @@ class Engine:
     # ---- публікація ----------------------------------------------------------------------
     def _spectrum_msg(self, idx: int, name: str, f0: float, f1: float, spec: np.ndarray,
                       floor: np.ndarray, points: int = SPECTRUM_POINTS) -> dict:
+        """Кадр спектра. Масиви — numpy float32: API сам вирішує, як їх віддати
+        (бінарно для застосунку або JSON для старих клієнтів)."""
         spec = np.where(np.isnan(spec), floor, spec)
         spec = np.nan_to_num(spec, nan=-140.0)
         floor = np.nan_to_num(floor, nan=-140.0)
         return {
             "type": "spectrum", "range": idx, "name": name, "f_start": f0, "f_stop": f1, "ts": time.time(),
-            "bins": np.round(spectrum.downsample_max(spec, points), 1).tolist(),
-            "floor": np.round(_downsample_mean(floor, points), 1).tolist(),
+            "bins": spectrum.downsample_max(spec, points).astype(np.float32),
+            "floor": _downsample_mean(floor, points).astype(np.float32),
             "threshold_db": self.cfg.dsp.threshold_db,
         }
+
+    def _publish_zoom(self, pano: Panorama, spec: np.ndarray, floor: np.ndarray) -> None:
+        """Збільшена ділянка (застосунок розвів пальцями): віддаємо її з повною деталізацією."""
+        z = self.hub.option("live", "zoom")
+        if not isinstance(z, dict) or z.get("range") != pano.index:
+            return
+        lo, hi = float(z.get("lo", pano.start_hz)), float(z.get("hi", pano.stop_hz))
+        a = max(0, int((lo - pano.start_hz) / pano.bin_hz))
+        b = min(len(spec), int(np.ceil((hi - pano.start_hz) / pano.bin_hz)) + 1)
+        if b - a < 8 or b - a >= len(spec) * 0.9:
+            return
+        msg = self._spectrum_msg(pano.index, pano.name, pano.start_hz + a * pano.bin_hz,
+                                 pano.start_hz + b * pano.bin_hz, spec[a:b], floor[a:b], SPECTRUM_POINTS)
+        msg["zoom"] = True
+        self.hub.publish("live", msg)
 
     def _publish_spectrum(self, pano: Panorama) -> None:
         spec, floor = pano.spec, pano.floor.get(slice(0, len(pano.spec)))
@@ -998,6 +1154,7 @@ class Engine:
                                  FULL_SPECTRUM_POINTS if pano.full else SPECTRUM_POINTS)
         self.last_spectrum[pano.index] = msg
         self.hub.publish("live", msg)
+        self._publish_zoom(pano, spec, floor)
 
     def _publish_signals(self) -> None:
         self.hub.publish("live", {"type": "signals", "signals": self.signals(), "ts": time.time()})
@@ -1013,6 +1170,17 @@ class Engine:
             pano.wf_last_save = time.time()
 
     # ---- для API ------------------------------------------------------------------------------
+    def sdr_info(self) -> dict:
+        return self.src.info()
+
+    def signal_detail(self, track_id: str) -> dict | None:
+        t = self.tracker.tracks.get(track_id)
+        if not t:
+            return None
+        d = t.to_dict()
+        d["rssi_history"] = list(t.rssi_history)
+        return d
+
     def signals(self) -> list[dict]:
         return [t.to_dict() for t in self.tracker.active()]
 
@@ -1054,7 +1222,7 @@ class Engine:
         peak_dbfs = float(np.max(s)) - self.gain_offset_db
         dc = self.cfg.distance
         dc.rx_cal_db = dist.calibrate(peak_dbfs, self.src.total_gain_db, freq_hz, distance_m, eirp_dbm,
-                                      dc.path_loss_exponent, dc.rx_antenna_gain_dbi)
+                                      dc.path_loss_exponent, self.cfg.antenna.gain_at(freq_hz, dc.rx_antenna_gain_dbi)[0])
         return dc.rx_cal_db
 
 

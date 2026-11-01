@@ -68,6 +68,24 @@ class AudioDemod:
         self.deemph = 0.0
         self.agc: float | None = None
 
+    def channel(self, iq: np.ndarray, offset_hz: float) -> tuple[np.ndarray, float, float]:
+        """Лише вирізати канал (для демодуляції НА ТЕЛЕФОНІ): iq на SDR_RATE →
+        (комплексний канал, його частота дискретизації, потужність дБ).
+        ЧМ вузька / АМ — 48 кГц, ЧМ широка — 240 кГц."""
+        n = len(iq)
+        w = -2 * np.pi * offset_hz / SDR_RATE
+        lo = np.exp(1j * (self.phase + w * np.arange(n))).astype(np.complex64)
+        self.phase = float((self.phase + w * n) % (2 * np.pi))
+        x = self.f1(iq.astype(np.complex64) * lo)[::10]                       # 240 кГц
+        rate = MID_RATE
+        if self.mode != "wfm":
+            if not hasattr(self, "f48"):
+                self.f48 = _OverlapFir(lowpass_taps(20e3 / MID_RATE, 47), True)
+            x = self.f48(x)[::5]                                                # 48 кГц
+            rate = MID_RATE / 5
+        p = float(np.mean(np.abs(x) ** 2)) + 1e-20 if len(x) else 1e-20
+        return x, rate, float(10 * np.log10(p))
+
     def process(self, iq: np.ndarray, offset_hz: float) -> tuple[np.ndarray, float]:
         """iq на SDR_RATE → (звук int16 на AUDIO_RATE, потужність каналу в дБ відносно повної шкали)."""
         n = len(iq)
@@ -107,6 +125,30 @@ class AudioDemod:
         audio = audio - float(np.mean(audio)) * 0.02
         pcm = np.clip(audio * 30000, -32767, 32767).astype("<i2")
         return pcm, float(10 * np.log10(ch_pow))
+
+
+IQ_HEADER = None
+
+
+def iq_packet(x: np.ndarray, rate: float, freq_hz: float, mode: str, level_db: float | None, squelch_db: float,
+              is_open: bool) -> bytes:
+    """Пакет вузької смуги для телефона: заголовок + int16 I/Q (масштаб — у заголовку).
+
+    36 байт: magic b"SDRA", ver u8 1, mode u8 (0 nfm, 1 wfm, 2 am), flags u16 (bit0 — шумодав відкритий),
+    freq f64, rate f32, scale f32 (значення = int16 × scale), level f32 (дБ над шумом), squelch f32, n u32.
+    """
+    import struct
+    global IQ_HEADER
+    if IQ_HEADER is None:
+        IQ_HEADER = struct.Struct("<4sBBHdffffI")
+    x = np.ascontiguousarray(x, dtype=np.complex64)
+    peak = float(np.max(np.abs(x.view(np.float32)))) if len(x) else 1.0
+    scale = max(peak, 1e-9) / 32000.0
+    q = np.clip(np.round(x.view(np.float32) / scale), -32767, 32767).astype("<i2")
+    head = IQ_HEADER.pack(b"SDRA", 1, {"nfm": 0, "wfm": 1, "am": 2}[mode], 1 if is_open else 0, float(freq_hz),
+                          float(rate), scale, float(level_db if level_db is not None else -99.0),
+                          float(squelch_db), len(x))
+    return head + q.tobytes()
 
 
 def window_peaks(iq: np.ndarray, center_hz: float, step_hz: float, start_hz: float, stop_hz: float,
