@@ -153,7 +153,7 @@ class Engine:
 
     def _try_open(self) -> bool:
         try:
-            self.src.open()
+            self.src.open(self.cfg.sdr.sample_rate)     # частота — до запуску потоку
             self.src.set_sample_rate(self.cfg.sdr.sample_rate)
             self._apply_gain()
             if not self.panoramas or self._need_plan:
@@ -1044,6 +1044,8 @@ class Engine:
             self._last_good = now
         elif now - getattr(self, "_last_good", now) > 5.0:
             self._last_good = now
+            if hasattr(self.src, "note_no_data"):
+                self.src.note_no_data()
             raise RuntimeError("HackRF не дає даних 5 с — перепідключення")
         # Конвертер із гетеродином вище сигналу дзеркалить спектр — повертаємо як в ефірі
         return np.conj(iq) if self.fe.inverted else iq

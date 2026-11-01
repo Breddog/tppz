@@ -36,7 +36,7 @@ class SoapySource(SdrSource):
         if lim:
             self.min_freq_hz, self.max_freq_hz, self.max_sample_rate = lim
 
-    def open(self) -> None:
+    def open(self, rate: float | None = None) -> None:
         import SoapySDR  # noqa: N813  (пакет python3-soapysdr)
         from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_RX
 
@@ -63,19 +63,10 @@ class SoapySource(SdrSource):
             self.hw_info = {k: str(v) for k, v in hw.items()}
         except Exception:  # noqa: BLE001
             pass
-        # Рідний формат HackRF — CS8 (8-біт I/Q). Читаємо його напряму: у 4 рази менше даних через
-        # драйвер і пам'ять, ніж CF32 (float), а в float перетворюємо лише те, що прочитали.
-        self._cs8 = False
-        try:
-            native, _scale = self.dev.getNativeStreamFormat(SOAPY_SDR_RX, 0)
-            if native == "CS8" and getattr(self, "stream_format", "auto") in ("auto", "CS8"):
-                self.stream = self.dev.setupStream(SOAPY_SDR_RX, "CS8")
-                self._cs8 = True
-        except Exception:  # noqa: BLE001 — старий драйвер: звичайний CF32
-            self._cs8 = False
-        if not self._cs8:
-            self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
-        self.dev.activateStream(self.stream)
+        if rate:
+            self._apply_rate(rate)            # частота — ДО запуску потоку (HackRF так надійніше)
+        self.stream = None
+        self._start_stream()
         self.tx_stream = None
         try:
             self.can_transmit = self.dev.getNumChannels(self._soapy.SOAPY_SDR_TX) > 0
@@ -100,21 +91,8 @@ class SoapySource(SdrSource):
         # Скинути «старі» відліки з буфера після перебудови PLL
         self._flush()
 
-    def set_sample_rate(self, rate: float) -> None:
-        """Змінити частоту дискретизації. Під час активного потоку деякі драйвери (HackRF) її не
-        застосовують — тоді плата лишалася на 20 МГц, а звук рахувався як для 2.4 МГц (лише шум).
-        Тому: зупинити потік → задати частоту й смугу → перевірити фактичну → запустити потік."""
+    def _apply_rate(self, rate: float) -> None:
         rate = min(rate, self.max_sample_rate)
-        if abs(rate - (self.sample_rate or 0)) < 1:
-            return
-        active = getattr(self, "stream", None) is not None
-        restarted = False
-        if active:
-            try:
-                self.dev.deactivateStream(self.stream)
-                restarted = True
-            except Exception as e:  # noqa: BLE001
-                log.warning("deactivateStream: %s", e)
         self.dev.setSampleRate(self._rx, 0, rate)
         try:
             self.dev.setBandwidth(self._rx, 0, rate * 0.9)
@@ -127,22 +105,55 @@ class SoapySource(SdrSource):
         if abs(actual - rate) > rate * 0.01:
             log.warning("Частота дискретизації: просили %.3f МГц, плата дала %.3f МГц", rate / 1e6, actual / 1e6)
         self.sample_rate = actual
-        if restarted:
+
+    def _start_stream(self) -> None:
+        """Новий потік. Рідний формат HackRF — CS8 (8-біт I/Q): у 4 рази менше даних через драйвер;
+        після повторної відсутності даних (no_data) — звичайний CF32."""
+        from SoapySDR import SOAPY_SDR_CF32
+        self._cs8 = False
+        if getattr(self, "stream_format", "auto") in ("auto", "CS8") and getattr(self, "_no_data", 0) < 2:
             try:
-                self.dev.activateStream(self.stream)
-            except Exception as e:  # noqa: BLE001 — потік не запустився: створити заново
-                log.warning("activateStream після зміни частоти: %s — створюю потік заново", e)
-                try:
-                    self.dev.closeStream(self.stream)
-                except Exception:  # noqa: BLE001
-                    pass
-                fmt = "CS8" if getattr(self, "_cs8", False) else self._soapy.SOAPY_SDR_CF32
-                self.stream = self.dev.setupStream(self._rx, fmt)
-                self.dev.activateStream(self.stream)
-            try:
-                self._flush(30)          # викинути відліки, що встигли прийти на старій частоті
-            except Exception:  # noqa: BLE001
-                pass
+                native, _scale = self.dev.getNativeStreamFormat(self._rx, 0)
+                if native == "CS8":
+                    self.stream = self.dev.setupStream(self._rx, "CS8")
+                    self._cs8 = True
+            except Exception:  # noqa: BLE001 — старий драйвер: звичайний CF32
+                self._cs8 = False
+        if not self._cs8:
+            self.stream = self.dev.setupStream(self._rx, SOAPY_SDR_CF32)
+        self.dev.activateStream(self.stream)
+
+    def _stop_stream(self) -> None:
+        if getattr(self, "stream", None) is None:
+            return
+        try:
+            self.dev.deactivateStream(self.stream)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.dev.closeStream(self.stream)
+        except Exception:  # noqa: BLE001
+            pass
+        self.stream = None
+
+    def note_no_data(self) -> None:
+        """Сторожовий таймер: даних немає. Двічі поспіль — далі без CS8 (звичайний CF32)."""
+        self._no_data = getattr(self, "_no_data", 0) + 1
+        if self._no_data == 2:
+            log.warning("HackRF не дає даних у форматі CS8 — переходжу на CF32")
+
+    def set_sample_rate(self, rate: float) -> None:
+        """Змінити частоту дискретизації: потік закривається, частота задається, потік створюється
+        ЗАНОВО (повторний запуск старого потоку в HackRF інколи лишав його «німим»)."""
+        rate = min(rate, self.max_sample_rate)
+        if abs(rate - (self.sample_rate or 0)) < 1:
+            return
+        had = getattr(self, "stream", None) is not None
+        if had:
+            self._stop_stream()
+        self._apply_rate(rate)
+        if had:
+            self._start_stream()
 
     def set_gain(self, lna: float, vga: float, amp: bool) -> None:
         names = self.dev.listGains(self._rx, 0)

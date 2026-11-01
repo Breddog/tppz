@@ -224,8 +224,9 @@ class SimulatedSource(SdrSource):
         self.rng = np.random.default_rng(seed)
         self.clock = 0.0
 
-    def open(self) -> None:
-        pass
+    def open(self, rate: float | None = None) -> None:
+        if rate:
+            self.set_sample_rate(rate)
 
     def close(self) -> None:
         pass
