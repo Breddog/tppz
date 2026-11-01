@@ -28,7 +28,7 @@ class AppUpdate {
   static Future<AppRelease?> latest() => NetBind.forInternet(() async {
     final r = await http
         .get(
-          Uri.parse('https://api.github.com/repos/$kUpdateRepo/releases?per_page=40'),
+          Uri.parse('https://api.github.com/repos/$kUpdateRepo/releases?per_page=100'),
           headers: {'Accept': 'application/vnd.github+json'},
         )
         .timeout(const Duration(seconds: 15));

@@ -88,20 +88,28 @@ class Updater:
     # ---- завантаження з GitHub самим модулем ------------------------------------------------------
     def latest(self) -> dict:
         """Останні релізи для кожного типу: {kind: {tag, url, sha256_url}}."""
-        url = f"https://api.github.com/repos/{self.repo}/releases?per_page=30"
+        url = f"https://api.github.com/repos/{self.repo}/releases?per_page=100"
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "sdrwatch"})
         with urllib.request.urlopen(req, timeout=15) as r:
             releases = json.load(r)
         out: dict = {}
+
+        def num(tag: str) -> int:
+            try:
+                return int(tag.rsplit("-", 1)[-1])
+            except ValueError:
+                return -1
+
+        # GitHub віддає релізи НЕ за номером збірки — беремо найбільший номер, а не перший у списку
         for rel in releases:
+            tag = rel.get("tag_name", "")
             for kind, (prefix, fname, _) in KINDS.items():
-                if kind in out or not rel.get("tag_name", "").startswith(prefix):
+                if not tag.startswith(prefix) or (kind in out and num(out[kind]["tag"]) >= num(tag)):
                     continue
                 assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
                 if fname in assets:
-                    out[kind] = {"tag": rel["tag_name"], "url": assets[fname],
-                                 "sha256_url": assets.get(fname + ".sha256")}
+                    out[kind] = {"tag": tag, "url": assets[fname], "sha256_url": assets.get(fname + ".sha256")}
         return out
 
     def fetch_and_stage(self, kind: str) -> dict:

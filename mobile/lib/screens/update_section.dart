@@ -70,7 +70,7 @@ class _UpdateSectionState extends State<UpdateSection> {
       final r = await NetBind.forInternet(
         () => http
             .get(
-              Uri.parse('https://api.github.com/repos/$kUpdateRepo/releases?per_page=30'),
+              Uri.parse('https://api.github.com/repos/$kUpdateRepo/releases?per_page=100'),
               headers: {'Accept': 'application/vnd.github+json'},
             )
             .timeout(const Duration(seconds: 15)),
@@ -82,8 +82,10 @@ class _UpdateSectionState extends State<UpdateSection> {
             a['name'] as String: a['browser_download_url'] as String,
         };
         for (final e in _assets.entries) {
-          if (!out.containsKey(e.key) && tag.startsWith('${e.key}-') && assets.containsKey(e.value)) {
-            out[e.key] = _Release(tag, assets[e.value]!, assets['${e.value}.sha256']);
+          // GitHub віддає релізи не за номером збірки — беремо НАЙБІЛЬШИЙ номер, а не перший у списку
+          if (tag.startsWith('${e.key}-') && assets.containsKey(e.value)) {
+            final cand = _Release(tag, assets[e.value]!, assets['${e.value}.sha256']);
+            if (!out.containsKey(e.key) || cand.number > out[e.key]!.number) out[e.key] = cand;
           }
         }
       }
