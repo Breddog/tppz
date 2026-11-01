@@ -63,6 +63,8 @@ class AudioReq(BaseModel):
     scan_freqs: list[float] | None = None   # сканування збережених частот (пам'ять)
     hold_s: float = 2.0                     # затримка після кінця передачі, с
     lockout: list[float] | None = None      # заблоковані (пропущені) частоти
+    preview_s: float = 0.0                  # «скан» як в авто: слухати кожну станцію N с (0 — поки звучить)
+    store: bool = False                     # «пошук усіх станцій»: коло без зупинок → найсильніша
 
 
 class AudioParams(BaseModel):
@@ -449,10 +451,11 @@ def create_app(app_state) -> FastAPI:
     def audio_start(req: AudioReq):
         scan = None
         if req.scan_freqs:
-            scan = {"freqs": req.scan_freqs, "hold_s": req.hold_s, "lockout": req.lockout}
+            scan = {"freqs": req.scan_freqs, "hold_s": req.hold_s, "lockout": req.lockout,
+                    "preview_s": req.preview_s}
         elif req.scan_start_hz and req.scan_stop_hz:
             scan = {"start_hz": req.scan_start_hz, "stop_hz": req.scan_stop_hz, "step_hz": req.scan_step_hz,
-                    "hold_s": req.hold_s, "lockout": req.lockout}
+                    "hold_s": req.hold_s, "lockout": req.lockout, "preview_s": req.preview_s, "store": req.store}
         try:
             return st.engine.start_audio(req.freq_hz, req.mod, req.squelch_db, scan)
         except ValueError as e:

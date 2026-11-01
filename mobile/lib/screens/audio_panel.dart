@@ -77,6 +77,9 @@ class _AudioPanelState extends State<AudioPanel> {
   final _toCtl = TextEditingController(text: '146.000');
   double _rangeStep = 12.5e3;
   double _hold = 2;
+  // Як в авто: «скан» (слухати кожну станцію N с) або «пошук усіх станцій» (AUTO STORE)
+  bool _store = false;
+  double _preview = 5;
   List<double> _memory = [];
   double _step = 12.5e3;
   Timer? _tuneT;
@@ -256,7 +259,13 @@ class _AudioPanelState extends State<AudioPanel> {
   /// Сканер: пресет / від–до / збережені частоти. Модуль зупиняється на сигналі вище шумодава,
   /// після кінця передачі чекає «затримку» й шукає далі (як сканери Uniden / RadioShack).
   Future<void> _scan() => _do(() async {
-    final body = <String, dynamic>{'mod': _mod, 'squelch_db': _squelch, 'hold_s': _hold};
+    final body = <String, dynamic>{
+      'mod': _mod,
+      'squelch_db': _squelch,
+      'hold_s': _hold,
+      'preview_s': _store ? 0 : _preview,
+      'store': _store && _scanMode != 'memory',
+    };
     switch (_scanMode) {
       case 'preset':
         setState(() => _mod = _preset.mod);
@@ -538,14 +547,6 @@ class _ScannerCard extends StatelessWidget {
     final api = st.widget.api;
     final found = ((scan?['found'] as List?) ?? const []).cast<Map<String, dynamic>>();
     final lockout = ((scan?['lockout'] as List?) ?? const []).cast<num>();
-    String ago(num? t) {
-      if (t == null) return '';
-      final s = DateTime.now().millisecondsSinceEpoch / 1000 - t;
-      return s < 60
-          ? '${s.round()} с тому'
-          : (s < 3600 ? '${(s / 60).round()} хв тому' : '${(s / 3600).round()} год тому');
-    }
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(10),
@@ -652,6 +653,40 @@ class _ScannerCard extends StatelessWidget {
                           ),
                       ],
                     ),
+            const SizedBox(height: 6),
+            if (st._scanMode != 'memory')
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, icon: Icon(Icons.radio, size: 18), label: Text('Скан')),
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.manage_search, size: 18),
+                    label: Text('Пошук усіх станцій'),
+                  ),
+                ],
+                selected: {st._store},
+                onSelectionChanged: (v) => st.update(() => st._store = v.first),
+              ),
+            if (!st._store || st._scanMode == 'memory')
+              Row(
+                children: [
+                  Text(
+                    st._preview == 0
+                        ? 'Слухати станцію: поки звучить'
+                        : 'Слухати кожну станцію: ${st._preview.round()} с',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: st._preview,
+                      min: 0,
+                      max: 15,
+                      divisions: 15,
+                      onChanged: (v) => st.update(() => st._preview = v),
+                    ),
+                  ),
+                ],
+              ),
             Row(
               children: [
                 Text('Затримка після передачі: ${st._hold.toStringAsFixed(1)} с', style: const TextStyle(fontSize: 13)),
@@ -671,8 +706,8 @@ class _ScannerCard extends StatelessWidget {
               runSpacing: 6,
               children: [
                 FilledButton.icon(
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Сканувати'),
+                  icon: Icon(st._store && st._scanMode != 'memory' ? Icons.manage_search : Icons.play_arrow),
+                  label: Text(st._store && st._scanMode != 'memory' ? 'Знайти станції' : 'Сканувати'),
                   onPressed: st._scan,
                 ),
                 if (scan != null && !scanning)
@@ -691,34 +726,53 @@ class _ScannerCard extends StatelessWidget {
                   OutlinedButton.icon(icon: const Icon(Icons.stop), label: const Text('Стоп'), onPressed: st._stop),
               ],
             ),
+            if (scan != null) ...[
+              const SizedBox(height: 10),
+              _ScanBar(
+                scan: scan!,
+                freqHz: (st.context.read<LiveConnection>().audio?['freq_hz'] as num?)?.toDouble(),
+                scanning: scanning,
+                onPick: (hz) {
+                  st._freq.text = (hz / 1e6).toStringAsFixed(5);
+                  st._listen();
+                },
+              ),
+            ],
             if (found.isNotEmpty) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
               Text(
-                'Знайдено (${found.length}) — натисніть, щоб слухати; ★ — у пам\'ять',
+                'Станції (${found.length}) — натисніть, щоб слухати; утримайте — у пам\'ять ★',
                 style: const TextStyle(color: Colors.white60, fontSize: 12),
               ),
-              for (final e in found.take(15))
-                ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.record_voice_over, color: Colors.lightBlueAccent),
-                  title: Text('${((e['freq_hz'] as num) / 1e6).toStringAsFixed(4)} МГц'),
-                  subtitle: Text('+${e['level_db']} дБ · ${e['hits']}× · ${ago(e['last_seen'] as num?)}'),
-                  onTap: () {
-                    st._freq.text = (((e['freq_hz'] as num) / 1e6)).toStringAsFixed(5);
-                    st._listen();
-                  },
-                  trailing: IconButton(
-                    icon: const Icon(Icons.star_border, color: Colors.amberAccent),
-                    onPressed: () {
-                      final f = (e['freq_hz'] as num).toDouble();
-                      if (!st._memory.any((m) => (m - f).abs() < 1)) {
-                        st.update(() => st._memory.add(f));
-                        st._saveMemory();
-                      }
-                    },
-                  ),
-                ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final e in [...found]..sort((a, b) => (a['freq_hz'] as num).compareTo(b['freq_hz'] as num)))
+                    _StationButton(
+                      freqHz: (e['freq_hz'] as num).toDouble(),
+                      levelDb: (e['level_db'] as num?)?.toDouble() ?? 0,
+                      active:
+                          !scanning &&
+                          ((st.context.read<LiveConnection>().audio?['freq_hz'] as num?)?.toDouble() ?? 0) -
+                                  (e['freq_hz'] as num).toDouble() ==
+                              0,
+                      starred: st._memory.any((m) => (m - (e['freq_hz'] as num).toDouble()).abs() < 1),
+                      onTap: () {
+                        st._freq.text = (((e['freq_hz'] as num) / 1e6)).toStringAsFixed(5);
+                        st._listen();
+                      },
+                      onLongPress: () {
+                        final f = (e['freq_hz'] as num).toDouble();
+                        if (!st._memory.any((m) => (m - f).abs() < 1)) {
+                          st.update(() => st._memory.add(f));
+                          st._saveMemory();
+                        }
+                      },
+                    ),
+                ],
+              ),
             ],
             if (lockout.isNotEmpty) ...[
               const Text('Заблоковані (пропускаються):', style: TextStyle(color: Colors.white60, fontSize: 12)),
@@ -735,6 +789,162 @@ class _ScannerCard extends StatelessWidget {
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Смуга пошуку як шкала магнітоли: бігунок — де зараз іде скан, риски — знайдені станції.
+class _ScanBar extends StatelessWidget {
+  const _ScanBar({required this.scan, required this.freqHz, required this.scanning, required this.onPick});
+
+  final Map<String, dynamic> scan;
+  final double? freqHz;
+  final bool scanning;
+  final void Function(double hz) onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final lo = (scan['start_hz'] as num).toDouble(), hi = (scan['stop_hz'] as num).toDouble();
+    final pos = scanning ? (scan['pos_hz'] as num?)?.toDouble() ?? freqHz : freqHz;
+    final found = ((scan['found'] as List?) ?? const []).cast<Map<String, dynamic>>();
+    return LayoutBuilder(
+      builder: (_, c) => GestureDetector(
+        onTapUp: (d) {
+          final hz = lo + (d.localPosition.dx / c.maxWidth).clamp(0.0, 1.0) * (hi - lo);
+          if (found.isEmpty) return;
+          final best = found.reduce(
+            (a, b) => ((a['freq_hz'] as num) - hz).abs() < ((b['freq_hz'] as num) - hz).abs() ? a : b,
+          );
+          onPick((best['freq_hz'] as num).toDouble());
+        },
+        child: CustomPaint(size: Size(c.maxWidth, 58), painter: _ScanBarPainter(lo, hi, pos, scanning, found)),
+      ),
+    );
+  }
+}
+
+class _ScanBarPainter extends CustomPainter {
+  _ScanBarPainter(this.lo, this.hi, this.pos, this.scanning, this.found);
+
+  final double lo, hi;
+  final double? pos;
+  final bool scanning;
+  final List<Map<String, dynamic>> found;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    const top = 6.0, h = 30.0;
+    double x(double hz) => ((hz - lo) / (hi - lo)).clamp(0.0, 1.0) * w;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(const Offset(0, top) & Size(w, h), const Radius.circular(6)),
+      Paint()..color = const Color(0xFF10141C),
+    );
+    // знайдені станції — риски, висота за рівнем
+    for (final e in found) {
+      final fx = x((e['freq_hz'] as num).toDouble());
+      final lvl = (((e['level_db'] as num?)?.toDouble() ?? 10) / 40).clamp(0.15, 1.0);
+      canvas.drawLine(
+        Offset(fx, top + h),
+        Offset(fx, top + h - h * lvl),
+        Paint()
+          ..color = Colors.lightBlueAccent
+          ..strokeWidth = 2,
+      );
+    }
+    // бігунок
+    if (pos != null) {
+      final px = x(pos!);
+      final col = scanning ? Colors.cyanAccent : Colors.greenAccent;
+      canvas.drawRect(Rect.fromLTWH(px - 1.5, top - 4, 3, h + 8), Paint()..color = col);
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '${(pos! / 1e6).toStringAsFixed(pos! < 1e9 ? 2 : 1)}${scanning ? ' …' : ''}',
+          style: TextStyle(color: col, fontSize: 11, fontWeight: FontWeight.bold),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset((px - tp.width / 2).clamp(0, w - tp.width), top + h + 4));
+    }
+    for (final (v, align) in [(lo, 0.0), (hi, 1.0)]) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: (v / 1e6).toStringAsFixed(v < 1e9 ? 1 : 0),
+          style: const TextStyle(color: Colors.white38, fontSize: 10),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(align == 0 ? 0 : w - tp.width, top + h + 4 + (pos != null ? 0 : 0)));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+/// Кнопка станції як пресет на магнітолі: частота + шкала сигналу.
+class _StationButton extends StatelessWidget {
+  const _StationButton({
+    required this.freqHz,
+    required this.levelDb,
+    required this.active,
+    required this.starred,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  final double freqHz, levelDb;
+  final bool active, starred;
+  final VoidCallback onTap, onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final bars = (levelDb / 10).clamp(1, 4).round();
+    return Material(
+      color: active ? const Color(0xFF1E5A46) : const Color(0xFF1F2430),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (starred) const Icon(Icons.star, size: 12, color: Colors.amberAccent),
+                  Text(
+                    (freqHz / 1e6).toStringAsFixed(freqHz < 300e6 && freqHz % 100e3 == 0 ? 1 : 3),
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      color: active ? Colors.greenAccent : Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < 4; i++)
+                    Container(
+                      width: 4,
+                      height: 4.0 + i * 3,
+                      margin: const EdgeInsets.only(right: 2),
+                      decoration: BoxDecoration(
+                        color: i < bars ? Colors.lightBlueAccent : Colors.white12,
+                        borderRadius: BorderRadius.circular(1),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );

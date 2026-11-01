@@ -224,7 +224,11 @@ class Engine:
                     # None — лишити старі блокування; [] — зняти всі
                     "lockout": sorted(set(float(f) for f in (scan.get("lockout") if scan.get("lockout") is not None
                                                               else old.get("lockout") or []))),
-                    "found": old.get("found", {}), "rounds": 0, "mem_i": 0}
+                    "found": {} if scan.get("store") else old.get("found", {}), "rounds": 0, "mem_i": 0,
+                    # «Скан» як в авто: послухати кожну станцію preview_s секунд і йти далі (0 — поки звучить)
+                    "preview_s": float(scan.get("preview_s") or 0.0),
+                    # «Пошук усіх станцій» (AUTO STORE): одне коло без зупинок, потім — найсильніша
+                    "store": bool(scan.get("store")), "hold_forever": False}
             freq_hz = freq_hz or start
         if freq_hz is None:
             raise ValueError("Потрібна частота")
@@ -261,6 +265,7 @@ class Engine:
         if not sc:
             return
         a["locked"] = False
+        sc["hold_forever"] = False
         if sc.get("freqs"):
             mem = sc["freqs"]
             nxt = next((k for k in range(len(mem)) if mem[k] > a["freq_hz"] + sc["step_hz"] / 2), None)
@@ -305,7 +310,9 @@ class Engine:
             found = sorted(sc["found"].values(), key=lambda e: -e["last_seen"])[:40]
             scan = {"start_hz": sc["start_hz"], "stop_hz": sc["stop_hz"], "step_hz": sc["step_hz"],
                     "hold_s": sc["hold_s"], "memory": len(sc.get("freqs") or []), "rounds": sc["rounds"],
-                    "lockout": sc["lockout"], "found": found, "center_hz": round(a["center"])}
+                    "lockout": sc["lockout"], "found": found, "center_hz": round(a["center"]),
+                    "pos_hz": round(a["center"] - au_offset(a)), "preview_s": sc.get("preview_s", 0),
+                    "store": bool(sc.get("store")), "holding": bool(sc.get("hold_forever"))}
         return {"active": True, "freq_hz": round(a["freq_hz"]), "mod": a["mod"], "squelch_db": a["squelch_db"],
                 "open": a["open"], "level_db": a["level_db"], "scanning": bool(sc) and not a["locked"],
                 "scan": scan}
@@ -341,14 +348,18 @@ class Engine:
                 peaks = au.window_peaks(iq, a["center"], sc["step_hz"], sc["start_hz"], sc["stop_hz"],
                                         a["squelch_db"])
             peaks = [p for p in peaks if all(abs(p[0] - f) > sc["step_hz"] / 2 for f in lock)]
+            for pf, pl in peaks:              # у список знайденого — усі станції у вікні
+                key = f"{pf / 1e6:.4f}"
+                e = sc["found"].setdefault(key, {"freq_hz": round(pf), "hits": 0, "first_seen": now})
+                e.update({"last_seen": now, "level_db": round(pl, 1)})
+                e["hits"] += 1
+            if sc.get("store"):
+                peaks = []                    # пошук усіх станцій — не зупиняємось
             if peaks:
                 a["freq_hz"], a["level_db"] = peaks[0][0], round(peaks[0][1], 1)
                 a["locked"], a["last_open"] = True, now
                 a["demod"] = au.AudioDemod(a["mod"])
-                key = f"{a['freq_hz'] / 1e6:.4f}"
-                e = sc["found"].setdefault(key, {"freq_hz": round(a["freq_hz"]), "hits": 0, "first_seen": now})
-                e.update({"last_seen": now, "level_db": a["level_db"]})
-                e["hits"] += 1
+                a["lock_t"] = now
                 if len(sc["found"]) > 100:
                     for k in sorted(sc["found"], key=lambda k: sc["found"][k]["last_seen"])[:10]:
                         sc["found"].pop(k, None)
@@ -366,6 +377,18 @@ class Engine:
                 if nxt - 1.0e6 > sc["stop_hz"]:
                     nxt = sc["start_hz"] + 1.0e6
                     sc["rounds"] += 1
+                    if sc.get("store"):
+                        # коло пройдено: увімкнути найсильнішу знайдену й стояти на ній
+                        sc["store"] = False
+                        best = max(sc["found"].values(), key=lambda e: e["level_db"], default=None)
+                        if best is not None:
+                            a["freq_hz"] = float(best["freq_hz"])
+                            a["center"] = a["freq_hz"] + au.TUNE_OFFSET
+                            a["locked"], a["last_open"], a["lock_t"] = True, now, now
+                            a["demod"] = au.AudioDemod(a["mod"])
+                            sc["hold_forever"] = True
+                            self.hub.publish("live", {"type": "audio", **self.audio_status(), "ts": now})
+                            return
                 a["center"] = nxt
                 a["freq_hz"] = max(sc["start_hz"], nxt - 1.0e6)
             self.hub.publish("live", {"type": "audio", **self.audio_status(), "ts": now})
@@ -394,8 +417,11 @@ class Engine:
             if self.hub.count("audio") > 0:      # старі застосунки / веб — готовий звук з модуля
                 pcm, _ = a["demod"].process(iq, a["freq_hz"] - a["center"])
                 self.hub.publish("audio", pcm.tobytes())
-        elif sc and now - a["last_open"] > sc["hold_s"]:
+        elif sc and not sc.get("hold_forever") and now - a["last_open"] > sc["hold_s"]:
             self._audio_resume()            # сигнал зник (затримка минула) — пошук далі
+        if sc and a["locked"] and not sc.get("hold_forever") and sc.get("preview_s") \
+                and now - a.get("lock_t", now) > sc["preview_s"]:
+            self._audio_resume()            # «скан» як в авто: послухали — далі
         # Живий спектр навколо частоти (2.4 МГц) — раз на 4 блоки
         a["n"] = a.get("n", 0) + 1
         if a["n"] % 4:
@@ -1483,6 +1509,14 @@ class Engine:
         dc.rx_cal_db = dist.calibrate(peak_dbfs, self.src.total_gain_db, freq_hz, distance_m, eirp_dbm,
                                       dc.path_loss_exponent, self.cfg.antenna.gain_at(freq_hz, dc.rx_antenna_gain_dbi)[0])
         return dc.rx_cal_db
+
+
+def au_offset(a: dict) -> float:
+    """Позиція пошуку для смуги в застосунку: центр вікна мінус зсув налаштування (або 1 МГц — пів вікна)."""
+    sc = a.get("scan") or {}
+    if a.get("locked") or sc.get("freqs"):
+        return a["center"] - a["freq_hz"]
+    return 1.0e6
 
 
 class _VInfo:

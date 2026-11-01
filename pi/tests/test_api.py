@@ -438,3 +438,41 @@ def test_wfm_broadcast_with_strong_neighbour():
     tone = sp[(fr > 900) & (fr < 1100)].sum()
     audio = sp[(fr > 100) & (fr < 15e3)].sum()
     assert tone / audio > 0.8, tone / audio
+
+
+def test_audio_autostore_and_preview(tmp_path):
+    """Як в авто: «пошук усіх станцій» знаходить усі й вмикає найсильнішу; «скан» слухає N с і йде далі."""
+    import time as _t
+
+    from sdrwatch.sources.simulated import Emitter
+    cfg = Config()
+    cfg.storage.path = str(tmp_path / "st")
+    em = [Emitter(f * 1e6, "wfm", power_dbm=p, bandwidth_hz=200e3, seed=i)
+          for i, (f, p) in enumerate([(88.8, -65), (95.4, -55), (101.5, -60), (104.0, -62)])]
+    eng = Engine(cfg, SimulatedSource(em), Storage(cfg.storage.path, 50), None, Hub())
+    eng.start()
+    try:
+        eng.start_audio(None, "wfm", 10.0, {"start_hz": 87.5e6, "stop_hz": 108e6, "step_hz": 100e3, "store": True})
+        t0 = _t.time()
+        while _t.time() - t0 < 20:
+            st = eng.audio_status()
+            if st["scan"] and st["scan"]["holding"]:
+                break
+            _t.sleep(0.2)
+        found = sorted(round(e["freq_hz"] / 1e5) / 10 for e in st["scan"]["found"])
+        for f in (88.8, 95.4, 101.5, 104.0):
+            assert f in found, found
+        assert abs(st["freq_hz"] - 95.4e6) < 50e3          # найсильніша
+        # «Скан»: по 0.5 с на станцію — частота має змінюватися сама
+        eng.start_audio(None, "wfm", 10.0, {"start_hz": 87.5e6, "stop_hz": 108e6, "step_hz": 100e3,
+                                             "preview_s": 0.5, "lockout": []})
+        seen = set()
+        t0 = _t.time()
+        while _t.time() - t0 < 12 and len(seen) < 3:
+            st = eng.audio_status()
+            if not st["scanning"]:
+                seen.add(round(st["freq_hz"] / 1e5))
+            _t.sleep(0.1)
+        assert len(seen) >= 3, seen
+    finally:
+        eng.stop()
