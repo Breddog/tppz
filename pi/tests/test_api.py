@@ -476,3 +476,34 @@ def test_audio_autostore_and_preview(tmp_path):
         assert len(seen) >= 3, seen
     finally:
         eng.stop()
+
+
+def test_video_autoscan_full_uses_sweep(tmp_path):
+    """Автоскан відео «весь діапазон»: спектр — режимом sweep, відео підтверджується звичайним потоком."""
+    import os
+    import sys
+    import time as _t
+
+    from sdrwatch.sources.simulated import Emitter
+    cfg = Config()
+    cfg.storage.path = str(tmp_path / "st")
+    cfg.sdr.sweep_cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "tools", "fake_hackrf_sweep.py")]
+    cfg.sdr.sweep_bin_hz = 250e3
+    eng = Engine(cfg, SimulatedSource([Emitter(5800e6, "analog", power_dbm=-55)]), Storage(cfg.storage.path, 50),
+                 None, Hub())
+    eng.start()
+    try:
+        _t.sleep(1.0)
+        eng.set_video_autoscan(True, mode="range", start_hz=5600e6, stop_hz=5950e6, dwell_s=0.5)
+        t0 = _t.time()
+        found = []
+        while _t.time() - t0 < 30:
+            auto = eng.watch_status.get("autoscan") or {}
+            found = [e for e in auto.get("found", {}).values() if e["type"] == "video"]
+            if found and eng.stats.get("fast_sweep"):
+                break
+            _t.sleep(0.3)
+        assert eng.stats.get("fast_sweep")
+        assert any(5795 < e["freq_mhz"] < 5805 for e in found), found
+    finally:
+        eng.stop()

@@ -1012,7 +1012,8 @@ class _ScanProgress extends StatelessWidget {
           '${dwelling ? 'Показую знайдене' : 'Пошук'}'
           '${pos != null ? ' · ${(pos / 1e6).toStringAsFixed(0)} МГц' : ''}'
           ' · коло ${(auto['rounds'] as num? ?? 0).toInt() + 1}'
-          '${roundS != null ? ' · коло за ${roundS.toStringAsFixed(1)} с' : ''}',
+          '${roundS != null ? ' · коло за ${roundS.toStringAsFixed(1)} с' : ''}'
+          '${auto['sweep'] == true ? ' · sweep прошивки' : ''}',
           style: const TextStyle(color: Colors.white60, fontSize: 12),
         ),
       ],

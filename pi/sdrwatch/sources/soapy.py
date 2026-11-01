@@ -100,13 +100,31 @@ class SoapySource(SdrSource):
         self._flush()
 
     def set_sample_rate(self, rate: float) -> None:
+        """Змінити частоту дискретизації. Під час активного потоку деякі драйвери (HackRF) її не
+        застосовують — тоді плата лишалася на 20 МГц, а звук рахувався як для 2.4 МГц (лише шум).
+        Тому: зупинити потік → задати частоту й смугу → перевірити фактичну → запустити потік."""
         rate = min(rate, self.max_sample_rate)
+        active = getattr(self, "stream", None) is not None
+        if active:
+            try:
+                self.dev.deactivateStream(self.stream)
+            except Exception:  # noqa: BLE001
+                active = False
         self.dev.setSampleRate(self._rx, 0, rate)
         try:
             self.dev.setBandwidth(self._rx, 0, rate * 0.9)
         except Exception:  # noqa: BLE001
             pass
-        self.sample_rate = rate
+        try:
+            actual = float(self.dev.getSampleRate(self._rx, 0))
+        except Exception:  # noqa: BLE001
+            actual = rate
+        if abs(actual - rate) > rate * 0.01:
+            log.warning("Частота дискретизації: просили %.3f МГц, плата дала %.3f МГц", rate / 1e6, actual / 1e6)
+        self.sample_rate = actual
+        if active:
+            self.dev.activateStream(self.stream)
+            self._flush(30)          # викинути відліки, що встигли прийти на старій частоті
 
     def set_gain(self, lna: float, vga: float, amp: bool) -> None:
         names = self.dev.listGains(self._rx, 0)

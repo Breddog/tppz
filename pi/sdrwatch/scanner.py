@@ -313,7 +313,8 @@ class Engine:
                     "lockout": sc["lockout"], "found": found, "center_hz": round(a["center"]),
                     "pos_hz": round(a["center"] - au_offset(a)), "preview_s": sc.get("preview_s", 0),
                     "store": bool(sc.get("store")), "holding": bool(sc.get("hold_forever"))}
-        return {"active": True, "freq_hz": round(a["freq_hz"]), "mod": a["mod"], "squelch_db": a["squelch_db"],
+        return {"active": True, "sdr_rate": a.get("sdr_rate"), "rate_error": a.get("rate_error"),
+                "freq_hz": round(a["freq_hz"]), "mod": a["mod"], "squelch_db": a["squelch_db"],
                 "open": a["open"], "level_db": a["level_db"], "scanning": bool(sc) and not a["locked"],
                 "scan": scan}
 
@@ -327,6 +328,10 @@ class Engine:
             self.src.set_sample_rate(au.SDR_RATE)
             self._audio_active = True
             a["tuned"] = None
+            sr = float(self.src.sample_rate or 0)
+            a["sdr_rate"] = sr
+            a["rate_error"] = (f"Приймач не перейшов на {au.SDR_RATE / 1e6:.1f} МГц (зараз {sr / 1e6:.2f} МГц) — "
+                               "звук буде спотворений") if abs(sr - au.SDR_RATE) > au.SDR_RATE * 0.01 else None
         now = time.time()
         sc = a["scan"]
         if sc and not a["locked"]:
@@ -759,6 +764,9 @@ class Engine:
                 if self._sweep_ok():
                     self._fast_scan_step()
                     continue
+                if self._search_sweep_wanted():
+                    self._search_sweep()
+                    continue
                 if self.sweeper is not None:
                     self._stop_sweeper()
                 # Приймача немає — тримаємо сервіс живим і періодично пробуємо відкрити SDR
@@ -799,16 +807,113 @@ class Engine:
                 self._recover()
 
     # ---- швидкий огляд: sweep прошивки HackRF ---------------------------------------------
-    def _sweep_ok(self) -> bool:
+    def _sweep_capable(self) -> bool:
         sd = self.cfg.sdr
-        if self.mode != "scan" or not sd.fast_sweep or time.time() < self._sweep_fail_until:
+        if not sd.fast_sweep or time.time() < self._sweep_fail_until:
             return False
-        if not self.panoramas:
-            return False                      # план ще не побудовано (приймач жодного разу не відкрито)
         if sd.sweep_cmd:
             return True
         from . import sweep
         return sd.driver == "soapy" and "hackrf" in sd.device_args.lower() and sweep.available()
+
+    def _sweep_ok(self) -> bool:
+        # план ще не побудовано (приймач жодного разу не відкрито) — спершу звичайний режим
+        return self.mode == "scan" and bool(self.panoramas) and self._sweep_capable()
+
+    def _search_sweep_wanted(self) -> bool:
+        """Автоскан відео «весь діапазон / від–до» між знахідками — теж режимом sweep прошивки."""
+        auto = (self.watch_status or {}).get("autoscan") if self.mode == "watch" else None
+        if not auto or auto.get("mode") not in ("full", "range") or not self.panoramas:
+            return False
+        now = time.time()
+        staying = now < auto.get("dwell_until", 0) or (not auto.get("circular") and auto.get("last_video", 0) > 0
+                                                         and now - auto["last_video"] < 1.0)
+        return not staying and self._sweep_capable()
+
+    def _start_sweeper(self, lo: float, hi: float) -> bool:
+        from . import sweep
+        sd = self.cfg.sdr
+        if self._opened:
+            try:
+                self.src.close()               # hackrf_sweep потрібен вільний HackRF
+            except Exception:  # noqa: BLE001
+                pass
+            self._opened = False
+        if self.sweeper is not None and self.sweeper.alive():
+            return True
+        if self.sweeper is not None:
+            err = self.sweeper.error or "hackrf_sweep зупинився"
+            self._stop_sweeper()
+            self._sweep_fail_until = time.time() + 60
+            self.stats["last_error"] = f"Швидкий огляд недоступний: {err} — звичайний режим"
+            log.warning(self.stats["last_error"])
+            return False
+        self.sweeper = sweep.Sweeper(lo, hi, sd.sweep_bin_hz, self.gain[0], self.gain[1], self.gain[2],
+                                     cmd=list(sd.sweep_cmd) or None)
+        try:
+            self.sweeper.start()
+        except OSError as e:
+            self.sweeper = None
+            self._sweep_fail_until = time.time() + 60
+            self.stats["last_error"] = f"hackrf_sweep не запустився: {e}"
+            return False
+        return True
+
+    def _search_sweep(self) -> None:
+        """Коло автоскану відео режимом sweep: спектр діапазону за частки секунди → широкі сигнали →
+        коротка перевірка синхроімпульсів звичайним потоком."""
+        auto = self.watch_status["autoscan"]
+        fs = self.cfg.sdr.sample_rate
+        lo, hi = auto["start_hz"] - fs * 0.4, auto["stop_hz"] + fs * 0.4
+        if self.sweeper is not None and (abs(self.sweeper.start_hz - max(0, lo // 1e6 * 1e6)) > 1e6):
+            self._stop_sweeper()               # змінився діапазон автоскану
+        if not self._start_sweeper(lo, hi):
+            return
+        try:
+            spec, sweep_s = self.sweeper.sweeps.get(timeout=1.0)
+        except queue.Empty:
+            self._publish_watch(auto, None)
+            return
+        d = self.cfg.dsp
+        f = self.sweeper.freqs()
+        sp = np.nan_to_num(spec, nan=-140.0) + float(self.cfg.sdr.sweep_offset_db)
+        floor = spectrum.local_floor(sp)
+        msg = self._spectrum_msg(-3, "Автоскан", float(f[0]), float(f[-1]), sp, floor, FULL_SPECTRUM_POINTS)
+        self.last_spectrum[-3] = msg
+        self.hub.publish("live", msg)
+        now = time.time()
+        auto["rounds"] = auto.get("rounds", 0) + 1
+        auto["round_s"] = round(sweep_s, 2)
+        auto["sweep"] = True
+        auto["idx"] = len(auto["freqs"]) - 1
+        auto["pos_hz"] = auto["stop_hz"]
+        self.stats["fast_sweep"] = True
+        self.stats["sweep_s"] = round(sweep_s, 3)
+        dets = spectrum.detect(sp, floor, f, d.threshold_db, 60e3)
+        if auto.get("audio"):
+            for det in dets:
+                if det.bandwidth_hz <= 250e3 and det.freq_hz < 1.35e9:
+                    self._found_add(auto, "audio", det.freq_hz, det.snr_db)
+        cands = sorted((x for x in dets if x.bandwidth_hz >= 2.5e6 and auto["start_hz"] - 5e6 <= x.freq_hz
+                        <= auto["stop_hz"] + 5e6), key=lambda x: -x.snr_db)[:6]
+        if cands:
+            self._ensure_soapy()               # перевірка — звичайним потоком
+            if self._opened:
+                fsr = self.src.sample_rate
+                for c in cands:
+                    self._tune(c.freq_hz)
+                    iq = self._read(int(fsr * baseband.FIELD_S))
+                    pkt, info = baseband.make_packet(iq, fsr, c.freq_hz,
+                                                     self.hub.option("baseband", "quality", "normal"))
+                    if info["is_video"]:
+                        fv = c.freq_hz + info["afc_offset_hz"]
+                        self.hub.publish("baseband", pkt)
+                        self._found_add(auto, "video", fv, c.snr_db, {"standard": info["standard"]})
+                        self.watch_freq = fv
+                        auto["dwell_until"] = now + auto["dwell_s"]
+                        auto["last_video"] = time.time()
+                        break
+        self._publish_watch(auto, None)
 
     def _stop_sweeper(self) -> None:
         if self.sweeper is not None:
@@ -822,33 +927,10 @@ class Engine:
             self._opened = self._try_open()
 
     def _fast_scan_step(self) -> None:
-        from . import sweep
-        sd = self.cfg.sdr
-        if self._opened:
-            try:
-                self.src.close()               # hackrf_sweep потрібен вільний HackRF
-            except Exception:  # noqa: BLE001
-                pass
-            self._opened = False
-        if self.sweeper is None or not self.sweeper.alive():
-            if self.sweeper is not None:
-                err = self.sweeper.error or "hackrf_sweep зупинився"
-                self._stop_sweeper()
-                self._sweep_fail_until = time.time() + 60
-                self.stats["last_error"] = f"Швидкий огляд недоступний: {err} — звичайне сканування"
-                log.warning(self.stats["last_error"])
-                return
-            lo = min(p.start_hz for p in self.panoramas)
-            hi = max(p.stop_hz for p in self.panoramas)
-            self.sweeper = sweep.Sweeper(lo, hi, sd.sweep_bin_hz, self.gain[0], self.gain[1], self.gain[2],
-                                         cmd=list(sd.sweep_cmd) or None)
-            try:
-                self.sweeper.start()
-            except OSError as e:
-                self.sweeper = None
-                self._sweep_fail_until = time.time() + 60
-                self.stats["last_error"] = f"hackrf_sweep не запустився: {e}"
-                return
+        lo = min(p.start_hz for p in self.panoramas)
+        hi = max(p.stop_hz for p in self.panoramas)
+        if not self._start_sweeper(lo, hi):
+            return
         try:
             spec, sweep_s = self.sweeper.sweeps.get(timeout=1.0)
         except queue.Empty:
@@ -1378,6 +1460,7 @@ class Engine:
                           "pos_hz": round(auto.get("pos_hz") or self.watch_freq),
                           "start_hz": auto.get("start_hz"), "stop_hz": auto.get("stop_hz"),
                           "dwelling": now < auto.get("dwell_until", 0), "audio": auto.get("audio", True),
+                          "sweep": bool(auto.get("sweep")),
                           "found": [{**e, "channel": e.get("channel") or e["key"]} for e in found]}
                          if auto else None),
         })

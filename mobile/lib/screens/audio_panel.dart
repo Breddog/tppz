@@ -383,6 +383,19 @@ class _AudioPanelState extends State<AudioPanel> {
                   '${_bytes > 0 ? ' · отримано ${(_bytes / 1024).round()} КБ' : ''}',
                   style: const TextStyle(color: Colors.white54, fontSize: 11.5),
                 ),
+                if (a['rate_error'] != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      a['rate_error'] as String,
+                      style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+                    ),
+                  )
+                else if (a['sdr_rate'] != null)
+                  Text(
+                    'Дискретизація приймача: ${((a['sdr_rate'] as num) / 1e6).toStringAsFixed(2)} МГц',
+                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
               ],
             ),
           ),
