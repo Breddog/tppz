@@ -33,6 +33,7 @@ class _VideoTabState extends State<VideoTab> {
   final _mhzCtl = TextEditingController();
   double _freqMhz = 5800;
   bool _started = false;
+  DateTime? _wsSince; // коли почали чекати перший кадр
   String _section = 'video'; // 'video' | 'audio'
   final Set<String> _scanBands = {'R', 'F', 'A', 'B', 'E'};
   Timer? _tuneDebounce;
@@ -60,6 +61,7 @@ class _VideoTabState extends State<VideoTab> {
   void _ensureStream() {
     if (_ws != null) return;
     try {
+      _wsSince ??= DateTime.now();
       _ws = WebSocketChannel.connect(Uri.parse(widget.api.wsUrl('/ws/video')));
       _sub = _ws!.stream.listen(
         (data) {
@@ -113,6 +115,17 @@ class _VideoTabState extends State<VideoTab> {
       _tuneDebounce?.cancel();
       _tuneDebounce = Timer(const Duration(milliseconds: 160), send);
     }
+  }
+
+  /// Пояснення, чому немає навіть «снігу».
+  String _noFrameHint(LiveConnection l) {
+    final waited = _wsSince == null ? 0 : DateTime.now().difference(_wsSince!).inSeconds;
+    if (l.status['sdr_connected'] == false) {
+      return 'HackRF не підключено до модуля — приймати нічого.\nПеревірте USB-кабель і живлення.';
+    }
+    if (waited < 5) return 'Підключення до відеопотоку…';
+    return 'Модуль не надсилає відео.\n\nСкоріше за все, на модулі стара прошивка (без живого відео). '
+        'Оновіть модуль: вкладка «Керування» → «Оновлення», або перепрошийте карту образом pi-11 чи новішим.';
   }
 
   @override
@@ -189,8 +202,15 @@ class _VideoTabState extends State<VideoTab> {
                 if (_frame != null)
                   Image.memory(_frame!, gaplessPlayback: true, fit: BoxFit.fill, filterQuality: FilterQuality.low)
                 else
-                  const Center(
-                    child: Text('Підключення до відеопотоку…', style: TextStyle(color: Colors.white54)),
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        _noFrameHint(l),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    ),
                   ),
                 Positioned(
                   left: 8,

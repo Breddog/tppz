@@ -28,10 +28,49 @@ jobs:
           channel: stable
           cache: true
 
+      # Постійний ключ підпису, щоб нові APK ставилися поверх старих.
+      # 1) Якщо задано секрет ANDROID_KEYSTORE_B64 (+ ANDROID_KEYSTORE_PASS) — беремо його.
+      # 2) Інакше — ключ, згенерований один раз і збережений у кеші GitHub Actions
+      #    (кеш живе, поки збірки йдуть хоча б раз на 7 днів; для надійності задайте секрет).
+      - name: Відновити ключ підпису з кешу
+        uses: actions/cache@v4
+        with:
+          path: ~/.sdrwatch-keystore
+          key: sdrwatch-apk-keystore-v1
+      - name: Підготувати ключ підпису
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+        run: |
+          D=~/.sdrwatch-keystore; mkdir -p $D
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > $D/release.p12
+            P="$KS_PASS"
+          else
+            if [ ! -f $D/release.p12 ]; then
+              head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' > $D/pass
+              keytool -genkeypair -storetype PKCS12 -keystore $D/release.p12 -alias sdrwatch \
+                -keyalg RSA -keysize 2048 -validity 10000 -storepass "$(cat $D/pass)" \
+                -keypass "$(cat $D/pass)" -dname "CN=SDR Watch, C=UA"
+            fi
+            P="$(cat $D/pass)"
+          fi
+          echo "::add-mask::$P"
+          echo "SDRWATCH_KEYSTORE=$D/release.p12" >> $GITHUB_ENV
+          echo "SDRWATCH_KEYSTORE_PASS=$P" >> $GITHUB_ENV
+          keytool -list -v -keystore $D/release.p12 -storepass "$P" | grep -m1 SHA256
+
       - run: flutter pub get
       - run: flutter analyze
-      - run: flutter build apk --release --split-per-abi
-      - run: flutter build apk --release
+      # Номер збірки = номер запуску CI: кожна нова APK має більший versionCode,
+      # а в застосунку видно «збірка N».
+      - name: Зібрати APK
+        env:
+          N: ${{ github.run_number }}
+        run: |
+          ARGS="--release --build-name=1.0.$N --build-number=$N --dart-define=APP_BUILD=$N"
+          flutter build apk $ARGS --split-per-abi
+          flutter build apk $ARGS
 
       - name: Перейменувати APK
         run: |
@@ -50,9 +89,14 @@ jobs:
         with:
           tag_name: apk-${{ github.run_number }}
           name: SDR Watch APK (збірка ${{ github.run_number }})
-          prerelease: true
+          prerelease: false
+          make_latest: true
           files: dist/*.apk
           body: |
+            ВАЖЛИВО (один раз): якщо стоїть застосунок зі збірки 10 або старішої — спершу
+            ВИДАЛІТЬ його (там був інший ключ підпису), потім встановіть цей. Далі нові збірки
+            ставляться поверх. Номер збірки видно на головному екрані застосунку.
+
             Встановлення: завантажте SDR-Watch-universal.apk на телефон і відкрийте його
             (дозвольте встановлення з невідомих джерел). Для більшості сучасних телефонів
             підходить і менший SDR-Watch-arm64.apk.

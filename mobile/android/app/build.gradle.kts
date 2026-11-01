@@ -30,11 +30,26 @@ android {
         versionName = flutter.versionName
     }
 
+    // ПОСТІЙНИЙ ключ підпису. Раніше кожна збірка CI підписувалася випадковим debug-ключем,
+    // тож Android відмовлявся оновлювати встановлений застосунок і лишалася стара версія.
+    // Ключ дає CI (секрет або збережений кеш) через змінні SDRWATCH_KEYSTORE / _PASS / _ALIAS.
+    // Локально без цих змінних — звичайний debug-підпис.
+    val ks = System.getenv("SDRWATCH_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (ks != null) {
+            create("release") {
+                storeFile = ks
+                storePassword = System.getenv("SDRWATCH_KEYSTORE_PASS")
+                keyAlias = System.getenv("SDRWATCH_KEY_ALIAS") ?: "sdrwatch"
+                keyPassword = System.getenv("SDRWATCH_KEYSTORE_PASS")
+                storeType = "PKCS12"
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (ks != null) "release" else "debug")
         }
     }
 }

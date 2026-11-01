@@ -147,7 +147,8 @@ def create_app(app_state) -> FastAPI:
     # ---- без авторизації: перевірка доступності ---------------------------------
     @app.get("/api/ping")
     def ping():
-        return {"app": "sdrwatch", "name": st.cfg.name, "id": st.device_id, "version": __version__}
+        return {"app": "sdrwatch", "name": st.cfg.name, "id": st.device_id, "version": __version__,
+                "build": updater.installed_build()}
 
     # ---- хто керує (режим «тільки один користувач») ---------------------------------
     @app.get("/api/control/holder", dependencies=[Depends(auth)])

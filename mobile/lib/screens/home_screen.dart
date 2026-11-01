@@ -21,7 +21,13 @@ class HomeScreen extends StatelessWidget {
     final store = context.watch<DeviceStore>();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('SDR Watch'),
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('SDR Watch'),
+            Text('збірка $appBuild', style: TextStyle(fontSize: 11, color: Colors.white54)),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings_outlined),

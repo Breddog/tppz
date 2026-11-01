@@ -6,6 +6,9 @@ import 'package:http/http.dart' as http;
 
 import 'models.dart';
 
+/// Номер збірки APK (задається в CI: --dart-define=APP_BUILD=N).
+const appBuild = String.fromEnvironment('APP_BUILD', defaultValue: 'dev');
+
 class ApiException implements Exception {
   ApiException(this.message);
   final String message;
