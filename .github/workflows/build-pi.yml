@@ -34,6 +34,7 @@ jobs:
           echo "pi-${{ github.run_number }}" > sdrwatch-pi/BUILD
           tar czf dist/sdrwatch-pi.tar.gz sdrwatch-pi
           (cd dist && sha256sum sdrwatch-pi.tar.gz > sdrwatch-pi.tar.gz.sha256)
+          cp pi/sdrwatch/data/channels.json dist/channels.json
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: pi-${{ github.run_number }}
@@ -42,6 +43,7 @@ jobs:
           files: |
             dist/sdrwatch-pi.tar.gz
             dist/sdrwatch-pi.tar.gz.sha256
+            dist/channels.json
           body: |
             **sdrwatch-pi-image.img.xz** — готовий образ SD-карти (Raspberry Pi OS Lite 64-bit + SDR Watch).
             Запишіть його Raspberry Pi Imager або balenaEtcher, відредагуйте `sdrwatch.txt` на розділі `bootfs`

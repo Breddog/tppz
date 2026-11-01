@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 
 MHZ = 1e6
@@ -40,33 +42,11 @@ class Band:
         return f"{self.code}{i + 1}"
 
 
-BANDS: list[Band] = [
-    # ---- 5.8 ГГц аналогові FPV ------------------------------------------
-    Band("A", "Boscam A", "analog", (5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725)),
-    Band("B", "Boscam B", "analog", (5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866)),
-    Band("E", "Boscam E", "analog", (5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945)),
-    Band("F", "Fatshark / IRC", "analog", (5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880)),
-    Band("R", "Raceband", "analog", (5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917)),
-    Band("L", "Lowrace", "analog", (5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621)),
-    Band("U", "Band U", "analog", (5325, 5348, 5366, 5384, 5402, 5420, 5438, 5456)),
-    Band("O", "Band O", "analog", (5474, 5492, 5510, 5528, 5546, 5564, 5582, 5600)),
-    Band("H", "Band H", "analog", (5653, 5693, 5733, 5773, 5813, 5853, 5893, 5933)),
-    # ---- 1.2 / 1.3 ГГц аналогові ----------------------------------------
-    Band("1G2", "1.2 ГГц (9 кан.)", "analog", (1080, 1120, 1160, 1200, 1240, 1258, 1280, 1320, 1360)),
-    Band("1G3", "1.3 ГГц", "analog", (1010, 1040, 1080, 1120, 1160, 1200, 1240, 1280, 1320, 1360)),
-    # ---- 3.3 ГГц аналогові ----------------------------------------------
-    Band("3G3", "3.3 ГГц", "analog", (3330, 3350, 3370, 3390, 3410, 3430, 3450, 3470)),
-    # ---- Цифрові відеосистеми (центри каналів, ширина 10/20/40 МГц) -------
-    Band("DJI", "DJI FPV / O3 / O4 / Walksnail", "digital",
-         (5660, 5695, 5735, 5770, 5805, 5839, 5878, 5914), bandwidth_hz=20 * MHZ),
-    Band("DJI40", "DJI O3/O4 40 МГц", "digital", (5795,), bandwidth_hz=40 * MHZ),
-    # ---- Wi-Fi 2.4 (джерело хибних тривог та також DJI/аналоги Wi-Fi FPV) --
-    Band("WIFI", "Wi-Fi 2.4 ГГц", "wifi", tuple(2412 + 5 * i for i in range(13)), bandwidth_hz=20 * MHZ),
-]
-
-ALL_CHANNELS: list[Channel] = [c for b in BANDS for c in b.channels()]
-BAND_BY_CODE = {b.code: b for b in BANDS}
-
+# Сітки й лінки — з бази data/channels.json (оновлюється з застосунку без перепрошивки, див. load()).
+BANDS: list[Band] = []
+ALL_CHANNELS: list[Channel] = []
+BAND_BY_CODE: dict[str, Band] = {}
+DB_INFO: dict = {"version": 0}
 
 @dataclass(frozen=True)
 class LinkRange:
@@ -76,19 +56,8 @@ class LinkRange:
     kind: str  # "control", "telemetry", "video", "wifi"
 
 
-# Діапазони, у яких працюють типові лінки керування та телеметрії
-LINK_RANGES: list[LinkRange] = [
-    LinkRange("ELRS / TBS Tracer / FrSky 2.4 ГГц", 2_400e6, 2_480e6, "control"),
-    LinkRange("ELRS / Crossfire 868 МГц (EU)", 863e6, 870e6, "control"),
-    LinkRange("ELRS / Crossfire 915 МГц", 902e6, 928e6, "control"),
-    LinkRange("LRS 433 МГц", 430e6, 440e6, "control"),
-    LinkRange("Телеметрія SiK/MAVLink 433", 433e6, 435e6, "telemetry"),
-    LinkRange("Телеметрія SiK/MAVLink 868/915", 868e6, 928e6, "telemetry"),
-    LinkRange("FPV відео 5.8 ГГц", 5_325e6, 5_950e6, "video"),
-    LinkRange("FPV відео 1.2–1.3 ГГц", 1_000e6, 1_400e6, "video"),
-    LinkRange("FPV відео 3.3 ГГц", 3_300e6, 3_500e6, "video"),
-    LinkRange("DJI / Wi-Fi 5.1–5.3 ГГц", 5_150e6, 5_350e6, "video"),
-]
+# Діапазони, у яких працюють типові лінки керування та телеметрії (заповнює load())
+LINK_RANGES: list[LinkRange] = []
 
 
 # Відомі «фонові» служби: на повному діапазоні вони завжди є в ефірі й не є загрозою.
@@ -136,8 +105,8 @@ class ChannelMatch:
         }
 
 
-# Рідковживані сітки програють популярним (R, F, A, B, E), якщо відхилення схожі
-BAND_PENALTY_HZ = {"L": 1.5e6, "U": 1.5e6, "O": 1.5e6, "H": 1.5e6, "1G3": 0.5e6}
+# Рідковживані сітки програють популярним (R, F, A, B, E), якщо відхилення схожі (заповнює load())
+BAND_PENALTY_HZ: dict[str, float] = {}
 
 
 def match_channel(freq_hz: float, bandwidth_hz: float = 0.0, kind: str | None = None,
@@ -196,7 +165,88 @@ def priority_scan_list(freq_hz: float, kind: str = "analog", limit: int = 24) ->
 
 
 def bands_as_dict() -> list[dict]:
+    meta = {b["code"]: b for b in DB_INFO.get("bands", [])}
     return [{"code": b.code, "title": b.title, "kind": b.kind,
              "bandwidth_hz": b.bandwidth_hz,
+             "makers": meta.get(b.code, {}).get("makers", []),
+             "group": meta.get(b.code, {}).get("group", ""),
+             "note": meta.get(b.code, {}).get("note", ""),
+             "popular": meta.get(b.code, {}).get("popular", False),
              "channels": [{"name": c.name, "freq_hz": c.freq_hz} for c in b.channels()]}
             for b in BANDS]
+
+
+# ---- база сіток -----------------------------------------------------------------------
+BUNDLED_DB = os.path.join(os.path.dirname(__file__), "data", "channels.json")
+USER_DB_NAME = "channels.json"     # оновлена база в теці сховища модуля
+
+
+def validate(db: dict) -> dict:
+    """Перевірка бази перед застосуванням (щоб зламаний файл не «осліпив» модуль)."""
+    if not isinstance(db, dict) or not isinstance(db.get("bands"), list) or not db["bands"]:
+        raise ValueError("База сіток: немає списку bands")
+    int(db.get("version", 0))
+    codes = set()
+    for b in db["bands"]:
+        if not b.get("code") or not b.get("title") or b.get("kind") not in ("analog", "digital", "wifi"):
+            raise ValueError(f"База сіток: неповна сітка {b.get('code')!r}")
+        if b["code"] in codes:
+            raise ValueError(f"База сіток: повтор коду {b['code']}")
+        codes.add(b["code"])
+        fs = [float(f) for f in b.get("freqs_mhz", [])]
+        if not fs or any(not (1 <= f <= 12000) for f in fs):
+            raise ValueError(f"База сіток: невірні частоти в {b['code']}")
+    for r in db.get("links", []):
+        if float(r["start_mhz"]) >= float(r["stop_mhz"]):
+            raise ValueError(f"База сіток: невірний діапазон лінку {r.get('name')}")
+    return db
+
+
+def apply(db: dict) -> None:
+    """Застосувати базу: списки оновлюються НА МІСЦІ (інші модулі тримають на них посилання)."""
+    validate(db)
+    bands = [Band(b["code"], b["title"], b["kind"], tuple(float(f) for f in b["freqs_mhz"]),
+                  float(b.get("bandwidth_mhz", 18)) * MHZ) for b in db["bands"]]
+    BANDS[:] = bands
+    ALL_CHANNELS[:] = [c for b in bands for c in b.channels()]
+    BAND_BY_CODE.clear()
+    BAND_BY_CODE.update({b.code: b for b in bands})
+    LINK_RANGES[:] = [LinkRange(r["name"], float(r["start_mhz"]) * MHZ, float(r["stop_mhz"]) * MHZ,
+                                r.get("kind", "control")) for r in db.get("links", [])]
+    BAND_PENALTY_HZ.clear()
+    BAND_PENALTY_HZ.update({b["code"]: 1.5e6 for b in db["bands"] if not b.get("popular")
+                            and b["kind"] == "analog"})
+    DB_INFO.clear()
+    DB_INFO.update(db)
+
+
+def load(storage_path: str | None = None) -> dict:
+    """Вбудована база або новіша з теки сховища (якщо її оновили з застосунку)."""
+    with open(BUNDLED_DB, encoding="utf-8") as f:
+        db = json.load(f)
+    if storage_path:
+        p = os.path.join(storage_path, USER_DB_NAME)
+        try:
+            with open(p, encoding="utf-8") as f:
+                user = validate(json.load(f))
+            if int(user.get("version", 0)) >= int(db.get("version", 0)):
+                db = user
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            import logging
+            logging.getLogger(__name__).warning("Оновлена база сіток пошкоджена (%s) — беру вбудовану", e)
+    apply(db)
+    return db
+
+
+def save_user_db(storage_path: str, db: dict) -> None:
+    validate(db)
+    os.makedirs(storage_path, exist_ok=True)
+    p = os.path.join(storage_path, USER_DB_NAME)
+    with open(p + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False)
+    os.replace(p + ".tmp", p)
+
+
+load()   # вбудована база — одразу при імпорті

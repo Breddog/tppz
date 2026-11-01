@@ -370,3 +370,19 @@ def test_audio_scanner_found_skip_memory(tmp_path):
         assert abs(st["freq_hz"] - 446.15625e6) < 1
     finally:
         eng.stop()
+
+
+def test_channels_db_update(client, tmp_path):
+    h = {"Authorization": "Bearer secret"}
+    db = client.get("/api/channels", headers=h).json()
+    assert db["version"] >= 1 and len(db["bands"]) > 20
+    new = {"version": db["version"] + 1, "bands": [
+        {"code": "R", "title": "Raceband", "kind": "analog", "freqs_mhz": [5658, 5695], "popular": True},
+        {"code": "Z", "title": "Нова сітка", "kind": "analog", "freqs_mhz": [5999]}], "links": []}
+    r = client.put("/api/channels", json=new, headers=h)
+    assert r.status_code == 200 and r.json()["bands"] == 2
+    assert any(b["code"] == "Z" for b in client.get("/api/channels", headers=h).json()["bands"])
+    bad = {"version": 99, "bands": [{"code": "Q", "title": "x", "kind": "analog", "freqs_mhz": [99999]}]}
+    assert client.put("/api/channels", json=bad, headers=h).status_code == 400
+    from sdrwatch import channels as ch
+    ch.load()   # повернути вбудовану базу для інших тестів

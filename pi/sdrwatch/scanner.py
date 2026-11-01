@@ -139,6 +139,10 @@ class Engine:
         # SDR відкриваємо «м'яко»: якщо приймача ще немає (не підключений HackRF),
         # сервіс усе одно стартує, а підключення повторюється у фоні. Так веб-сервер
         # і застосунок працюють навіть без приймача (показують «SDR не підключено»).
+        try:
+            ch.load(self.cfg.storage.path)
+        except Exception as e:  # noqa: BLE001 — зламана оновлена база: лишається вбудована
+            log.warning("База сіток: %s", e)
         self._opened = self._try_open()
         self._thread = threading.Thread(target=self._run, daemon=True, name="engine")
         self._thread.start()
@@ -1297,6 +1301,11 @@ class Engine:
             pano.wf_last_save = time.time()
 
     # ---- для API ------------------------------------------------------------------------------
+    def reload_channels(self) -> int:
+        """Перечитати базу сіток (її оновили через API) — у процесі обробки сигналу теж."""
+        ch.load(self.cfg.storage.path)
+        return len(ch.BANDS)
+
     def sdr_info(self) -> dict:
         return self.src.info()
 

@@ -6,6 +6,7 @@ import '../device_store.dart';
 import '../live.dart';
 import '../models.dart';
 import 'add_device_screen.dart';
+import 'channels_screen.dart';
 import 'module_sections.dart';
 import 'network_section.dart';
 import 'transmit_screen.dart';
@@ -281,6 +282,13 @@ class _ControlTabState extends State<ControlTab> {
             onTap: _calibrate,
           ),
 
+          ListTile(
+            leading: const Icon(Icons.grid_on),
+            title: const Text('База частотних сіток'),
+            subtitle: const Text('Сітки всіх відомих виробників, оновлення з інтернету без перепрошивки'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ChannelsScreen(api: widget.api))),
+          ),
           _h('Антена'),
           AntennaSection(
             antenna: (c['antenna'] as Map?)?.cast<String, dynamic>() ?? const {'name': 'Штатна (невідома)'},

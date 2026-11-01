@@ -244,12 +244,20 @@ class _LiveTabState extends State<LiveTab> {
     final l = context.watch<LiveConnection>();
     final ranges = ((l.status['ranges'] as List?) ?? const []).cast<Map<String, dynamic>>();
     final watching = l.watch != null || l.status['mode'] == 'watch' || l.audio?['active'] == true;
+    // Повна панорама модуля (увесь діапазон SDR, пріоритетні ділянки вже вклеєні в неї)
+    final fullIdx = ranges.where((r) => r['full'] == true).map((r) => r['index'] as int).firstOrNull;
     final autoscan = l.watch?['autoscan'] != null;
     // «Наживо» — те, що приймач робить зараз: автоскан (загальний спектр), стеження або звук
     final liveSrc = l.audio?['active'] == true && l.spectra.containsKey(-2)
         ? -2
         : (autoscan && l.spectra.containsKey(-3) ? -3 : -1);
-    final sel = (watching && (l.followWatch || l.selectedRange == null)) ? liveSrc : l.selectedRange;
+    final sel = (watching && (l.followWatch || l.selectedRange == null))
+        ? liveSrc
+        : (fullIdx != null && (l.selectedRange == null || l.selectedRange! >= 0) ? fullIdx : l.selectedRange);
+    if (fullIdx != null && sel == fullIdx && l.selectedRange != fullIdx) {
+      // модуль має слати саме повну панораму
+      WidgetsBinding.instance.addPostFrameCallback((_) => l.selectRange(fullIdx));
+    }
     final vfo = l.audio?['active'] == true
         ? (l.audio!['freq_hz'] as num?)?.toDouble()
         : (l.watch?['freq_hz'] as num?)?.toDouble();
@@ -280,18 +288,33 @@ class _LiveTabState extends State<LiveTab> {
                     onSelected: (_) => setState(() => l.followWatch = true),
                   ),
                 ),
-              for (final r in ranges)
+              // Без розбивки на діапазони-сітки: один суцільний «Увесь ефір» (масштаб — жестами/пресетами)
+              if (fullIdx != null)
                 Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: ChoiceChip(
-                    label: Text(r['name'] as String),
-                    selected: sel == r['index'],
+                    avatar: const Icon(Icons.public, size: 16),
+                    label: const Text('Увесь ефір'),
+                    selected: sel == fullIdx,
                     onSelected: (_) {
                       setState(() => l.followWatch = false);
-                      l.selectRange(r['index'] as int);
+                      l.selectRange(fullIdx);
                     },
                   ),
-                ),
+                )
+              else
+                for (final r in ranges)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      label: Text(r['name'] as String),
+                      selected: sel == r['index'],
+                      onSelected: (_) {
+                        setState(() => l.followWatch = false);
+                        l.selectRange(r['index'] as int);
+                      },
+                    ),
+                  ),
             ],
           ),
         ),
@@ -994,7 +1017,9 @@ class _MultiBand extends StatelessWidget {
     final keys = live.spectra.keys.where((k) => k != -2).toList()
       ..sort((a, b) => (a < 0 ? -100 + a : a).compareTo(b < 0 ? -100 + b : b));
     if (keys.isEmpty) {
-      return const Center(child: Text('Немає даних', style: TextStyle(color: Colors.white54)));
+      return const Center(
+        child: Text('Немає даних', style: TextStyle(color: Colors.white54)),
+      );
     }
     return ListView(
       padding: const EdgeInsets.fromLTRB(6, 4, 6, 8),

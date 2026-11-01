@@ -156,8 +156,10 @@ class LiveConnection extends ChangeNotifier {
   /// Показати частоту в «Ефірі»: вибрати діапазон, що її містить, і збільшити ±span/2 навколо.
   void focusFreq(double hz, {double span = 20e6}) {
     final ranges = ((status['ranges'] as List?) ?? const []).cast<Map<String, dynamic>>();
-    Map<String, dynamic>? best;
-    for (final r in ranges) {
+    Map<String, dynamic>? best = ranges
+        .where((r) => r['full'] == true && (r['start_hz'] as num) <= hz && hz <= (r['stop_hz'] as num))
+        .firstOrNull;
+    for (final r in best == null ? ranges : const <Map<String, dynamic>>[]) {
       final a = (r['start_hz'] as num).toDouble(), b = (r['stop_hz'] as num).toDouble();
       if (a <= hz && hz <= b && (best == null || (b - a) < ((best['stop_hz'] as num) - (best['start_hz'] as num)))) {
         best = r;

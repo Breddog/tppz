@@ -125,6 +125,7 @@ def create_app(app_state) -> FastAPI:
 
     app.state.pairing_open = lambda: pairing_left() > 0
     updater = Updater(st.cfg.storage.path, st.cfg.updates.repo)
+    ch.load(st.cfg.storage.path)      # база сіток: оновлена з теки сховища або вбудована
     from .health import Health
     health = Health(st.cfg.storage.path)
     health.start(st.hub)
@@ -286,9 +287,23 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/channels", dependencies=[Depends(auth)])
     def channels():
-        return {"bands": ch.bands_as_dict(),
+        return {"version": ch.DB_INFO.get("version", 0), "updated": ch.DB_INFO.get("updated"),
+                "bands": ch.bands_as_dict(),
                 "links": [{"name": r.name, "start_hz": r.start_hz, "stop_hz": r.stop_hz, "kind": r.kind}
                           for r in ch.LINK_RANGES]}
+
+    @app.put("/api/channels", dependencies=[Depends(require_control)])
+    async def put_channels(request: Request):
+        """Нова база частотних сіток (з GitHub через телефон) — без перепрошивки модуля."""
+        db = await request.json()
+        try:
+            ch.validate(db)
+            ch.save_user_db(st.cfg.storage.path, db)
+            ch.apply(db)
+            st.engine.reload_channels()
+        except (ValueError, KeyError, TypeError) as e:
+            raise HTTPException(400, str(e)) from e
+        return {"version": ch.DB_INFO.get("version"), "bands": len(ch.BANDS), "channels": len(ch.ALL_CHANNELS)}
 
     # ---- історія (кільцевий запис на флешці) ------------------------------------------------
     @app.get("/api/events", dependencies=[Depends(auth)])

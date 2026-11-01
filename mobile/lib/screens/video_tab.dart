@@ -67,7 +67,7 @@ class _VideoTabState extends State<VideoTab> {
   bool _autoStart = true; // відкрили вкладку, а модуль не дивиться відео — одразу круговий автоскан
   bool _circular = true;
   double _dwell = 3;
-  String _scanMode = 'grids'; // grids | full | range
+  String _scanMode = 'full'; // full | range | grids (сітки — окремий, не основний режим)
   bool _modeSynced = false; // підхопити режим, у якому вже працює модуль
   bool _scanAudio = true;
   final _fromCtl = TextEditingController(text: '900');
@@ -77,6 +77,18 @@ class _VideoTabState extends State<VideoTab> {
   final Map<int, DateTime> _thumbAt = {};
   String _section = 'video'; // 'video' | 'audio'
   final Set<String> _scanBands = {'R', 'F', 'A', 'B', 'E', '1G2', '3G3'};
+  // Аналогові сітки з бази модуля (оновлюється без перепрошивки)
+  List<Map<String, dynamic>> _gridBands = const [];
+
+  Future<void> _loadGrids() async {
+    try {
+      final r = await widget.api.get('/api/channels') as Map<String, dynamic>;
+      final bands = (r['bands'] as List).cast<Map<String, dynamic>>().where((b) => b['kind'] == 'analog').toList()
+        ..sort((a, b) => (b['popular'] == true ? 1 : 0).compareTo(a['popular'] == true ? 1 : 0));
+      if (mounted) setState(() => _gridBands = bands);
+    } catch (_) {}
+  }
+
   Timer? _tuneDebounce;
   DateTime _lastTune = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -95,6 +107,7 @@ class _VideoTabState extends State<VideoTab> {
   @override
   void initState() {
     super.initState();
+    _loadGrids();
     widget.watchRequest?.addListener(_onWatchRequest);
     widget.listenRequest?.addListener(_onListenRequest);
   }
@@ -597,9 +610,9 @@ class _VideoTabState extends State<VideoTab> {
                 const SizedBox(height: 6),
                 SegmentedButton<String>(
                   segments: const [
-                    ButtonSegment(value: 'grids', label: Text('Сітки')),
                     ButtonSegment(value: 'full', label: Text('Весь діапазон')),
                     ButtonSegment(value: 'range', label: Text('Від–до')),
+                    ButtonSegment(value: 'grids', label: Text('Сітки')),
                   ],
                   selected: {_scanMode},
                   onSelectionChanged: (v) {
@@ -620,11 +633,27 @@ class _VideoTabState extends State<VideoTab> {
                   Wrap(
                     spacing: 6,
                     children: [
-                      for (final b in const ['R', 'F', 'A', 'B', 'E', 'L', 'U', 'O', 'H', '1G2', '1G3', '3G3'])
-                        FilterChip(
-                          label: Text(b),
-                          selected: _scanBands.contains(b),
-                          onSelected: (v) => setState(() => v ? _scanBands.add(b) : _scanBands.remove(b)),
+                      for (final b
+                          in _gridBands.isEmpty
+                              ? const [
+                                  {'code': 'R'},
+                                  {'code': 'F'},
+                                  {'code': 'A'},
+                                  {'code': 'B'},
+                                  {'code': 'E'},
+                                  {'code': '1G2'},
+                                  {'code': '3G3'},
+                                ]
+                              : _gridBands)
+                        Tooltip(
+                          message:
+                              '${b['title'] ?? b['code']}${(b['makers'] as List?)?.isNotEmpty == true ? ' — ${(b['makers'] as List).take(3).join(', ')}' : ''}',
+                          child: FilterChip(
+                            label: Text(b['code'] as String),
+                            selected: _scanBands.contains(b['code']),
+                            onSelected: (v) =>
+                                setState(() => v ? _scanBands.add(b['code'] as String) : _scanBands.remove(b['code'])),
+                          ),
                         ),
                     ],
                   ),
