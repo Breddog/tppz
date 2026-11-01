@@ -47,9 +47,12 @@ def make_packet(iq: np.ndarray, fs: float, freq_hz: float, quality: str = "norma
     """IQ (complex64) → пакет для телефона + легкий аналіз для автоскану/AFC на самому Pi."""
     target, bits = QUALITY.get(quality, QUALITY["normal"])
     k = decimation(fs, target)
-    hz = fm_demod(iq, fs)
-    n = (len(hz) // k) * k
-    v = hz[:n].reshape(-1, k).mean(axis=1) if k > 1 else hz[:n]     # «коробковий» ФНЧ + проріджування
+    from .. import native
+    v = native.fm_baseband(iq, fs, k)          # C: детектор + проріджування в один прохід
+    if v is None:                               # немає прискорення — numpy
+        hz = fm_demod(iq, fs)
+        n = (len(hz) // k) * k
+        v = hz[:n].reshape(-1, k).mean(axis=1) if k > 1 else hz[:n]
     fs_out = fs / k
     sub = v[::4]
     p_lo, p_hi, med = np.percentile(sub, [0.5, 99.5, 50])

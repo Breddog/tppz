@@ -11,7 +11,7 @@ IMAGE=0
 echo "==> Системні пакети (SoapySDR + драйвери HackRF / RTL-SDR / Airspy)"
 export DEBIAN_FRONTEND=noninteractive
 PKGS="python3-venv python3-dev python3-numpy python3-pil python3-soapysdr soapysdr-tools soapysdr-module-hackrf
-      soapysdr-module-rtlsdr soapysdr-module-airspy hackrf rtl-sdr network-manager ca-certificates"
+      soapysdr-module-rtlsdr soapysdr-module-airspy hackrf rtl-sdr network-manager ca-certificates gcc libc6-dev"
 # Оновлення з телефону може прийти, коли в модуля немає інтернету — тоді apt не потрібен
 if dpkg -s $PKGS >/dev/null 2>&1; then
   echo "    усі пакети вже встановлено"
@@ -47,6 +47,13 @@ mkdir -p /opt/sdrwatch /etc/sdrwatch /var/lib/sdrwatch
 rm -rf /opt/sdrwatch/sdrwatch
 cp -r "$SRC/sdrwatch" /opt/sdrwatch/
 cp "$SRC/requirements.txt" /opt/sdrwatch/
+echo "==> Прискорення обробки сигналу (C)"
+mkdir -p /opt/sdrwatch/lib
+if command -v cc >/dev/null 2>&1; then
+  # Без -march=native: образ збирається в емуляторі; NEON на ARM64 є і так
+  cc -O3 -ffast-math -shared -fPIC -o /opt/sdrwatch/lib/libfastdsp.so /opt/sdrwatch/sdrwatch/native/fastdsp.c -lm \
+  || echo "   (не зібрано — працюватиме numpy)"
+fi
 install -m 755 "$SRC/image/sdrwatch-firstboot.sh" /usr/local/sbin/sdrwatch-firstboot
 install -m 755 "$SRC/image/sdrwatch-netwatch.sh" /usr/local/sbin/sdrwatch-netwatch
 install -m 755 "$SRC/image/sdrwatch-update.sh" /usr/local/sbin/sdrwatch-update

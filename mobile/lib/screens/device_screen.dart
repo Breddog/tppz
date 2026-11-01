@@ -783,7 +783,7 @@ class _ScanParamsState extends State<ScanParams> {
       _ => '${st['mode'] ?? '—'}',
     };
     final line =
-        '$mode · прохід ${stats['sweep_s'] ?? '—'} с'
+        '$mode${stats['fast_sweep'] == true && st['mode'] == 'scan' ? ' (sweep прошивки)' : ''} · прохід ${stats['sweep_s'] ?? '—'} с'
         '${fs != null ? ' · смуга ${(fs / 1e6).toStringAsFixed(1)} МГц' : ''}'
         '${dsp['rbw_hz'] != null ? ' · RBW ${((dsp['rbw_hz'] as num) / 1e3).toStringAsFixed(1)} кГц' : ''}'
         ' · поріг ${dsp['threshold_db'] ?? '—'} дБ';

@@ -386,3 +386,32 @@ def test_channels_db_update(client, tmp_path):
     assert client.put("/api/channels", json=bad, headers=h).status_code == 400
     from sdrwatch import channels as ch
     ch.load()   # повернути вбудовану базу для інших тестів
+
+
+def test_fast_sweep_mode(tmp_path):
+    """Швидкий огляд режимом sweep прошивки HackRF: спектр усього діапазону й виявлення без перебудов."""
+    import os
+    import sys
+    import time as _t
+    cfg = Config()
+    cfg.storage.path = str(tmp_path / "st")
+    cfg.sdr.sweep_cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "tools", "fake_hackrf_sweep.py")]
+    cfg.sdr.sweep_bin_hz = 250e3
+    eng = Engine(cfg, SimulatedSource([]), Storage(cfg.storage.path, 50), None, Hub())
+    eng.start()
+    try:
+        t0 = _t.time()
+        while _t.time() - t0 < 40:
+            if eng.stats.get("fast_sweep") and any(abs(t.freq_hz - 5800e6) < 3e6 for t in eng.tracker.tracks.values()):
+                break
+            _t.sleep(0.3)
+        assert eng.stats.get("fast_sweep"), eng.stats
+        assert any(abs(t.freq_hz - 5800e6) < 3e6 for t in eng.tracker.tracks.values())
+        full = [p for p in eng.panoramas if p.full][0]
+        assert full.pass_s > 0
+        # відео/звук — sweep зупиняється, звичайний потік відкривається
+        eng.set_mode("watch", 5800e6)
+        _t.sleep(1.5)
+        assert eng.sweeper is None and eng._opened
+    finally:
+        eng.stop()

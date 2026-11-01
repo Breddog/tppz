@@ -31,6 +31,7 @@ class LiveConnection extends ChangeNotifier {
   StreamSubscription? _sub;
   Timer? _retry;
   Timer? _notifyTimer;
+  Timer? _statusTimer;
   bool _dirty = false;
   bool _disposed = false;
   int _backoff = 1;
@@ -98,6 +99,16 @@ class LiveConnection extends ChangeNotifier {
       notifyListeners();
       _sub = _ch!.stream.listen(_onMsg, onDone: _onClosed, onError: (_) => _onClosed());
       _syncTime();
+      // Стан модуля (режим, час проходу, підсилення…) — раз на 5 с
+      _statusTimer?.cancel();
+      _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        if (!connected || _disposed) return;
+        try {
+          final st = await api.status();
+          status = {...status, ...st};
+          _changed();
+        } catch (_) {}
+      });
     } catch (e) {
       error = e.toString();
       _onClosed();
@@ -376,6 +387,7 @@ class LiveConnection extends ChangeNotifier {
     _disposed = true;
     _retry?.cancel();
     _notifyTimer?.cancel();
+    _statusTimer?.cancel();
     _sub?.cancel();
     _ch?.sink.close();
     _events.close();

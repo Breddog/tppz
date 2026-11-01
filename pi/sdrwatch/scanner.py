@@ -115,6 +115,10 @@ class Engine:
         self.last_spectrum: dict[int, dict] = {}
         self._need_plan = False
         self._calls: queue.Queue = queue.Queue()
+        # Швидкий огляд режимом sweep прошивки HackRF
+        self.sweeper = None
+        self._sweep_fail_until = 0.0
+        self._last_verify = 0.0
 
     def call(self, fn, timeout: float = 15.0):
         """Виконати fn у потоці приймача (SDR не можна чіпати з кількох потоків одночасно)."""
@@ -152,7 +156,8 @@ class Engine:
             self.src.open()
             self.src.set_sample_rate(self.cfg.sdr.sample_rate)
             self._apply_gain()
-            self._build_plan()
+            if not self.panoramas or self._need_plan:
+                self._build_plan()
             self.stats["last_error"] = ""
             return True
         except Exception as e:  # noqa: BLE001 — приймача може не бути або він зайнятий
@@ -166,6 +171,7 @@ class Engine:
 
     def stop(self) -> None:
         self._stop.set()
+        self._stop_sweeper()
         if self._thread:
             self._thread.join(timeout=5)
         self._tx_end()
@@ -720,7 +726,15 @@ class Engine:
         while not self._stop.is_set():
             try:
                 self._reconf.clear()
+                if not self._calls.empty():
+                    self._ensure_soapy()           # виклики (калібрування тощо) — через звичайний потік
                 self._run_calls()
+                # Огляд ефіру: режим sweep прошивки HackRF (швидко) — якщо доступний
+                if self._sweep_ok():
+                    self._fast_scan_step()
+                    continue
+                if self.sweeper is not None:
+                    self._stop_sweeper()
                 # Приймача немає — тримаємо сервіс живим і періодично пробуємо відкрити SDR
                 if not self._opened:
                     if time.time() >= self._next_open:
@@ -757,6 +771,115 @@ class Engine:
                 self.stats["last_error"] = str(e)
                 log.exception("Помилка циклу")
                 self._recover()
+
+    # ---- швидкий огляд: sweep прошивки HackRF ---------------------------------------------
+    def _sweep_ok(self) -> bool:
+        sd = self.cfg.sdr
+        if self.mode != "scan" or not sd.fast_sweep or time.time() < self._sweep_fail_until:
+            return False
+        if not self.panoramas:
+            return False                      # план ще не побудовано (приймач жодного разу не відкрито)
+        if sd.sweep_cmd:
+            return True
+        from . import sweep
+        return sd.driver == "soapy" and "hackrf" in sd.device_args.lower() and sweep.available()
+
+    def _stop_sweeper(self) -> None:
+        if self.sweeper is not None:
+            self.sweeper.stop()
+            self.sweeper = None
+
+    def _ensure_soapy(self) -> None:
+        """Для відео/звуку/перевірки кандидатів потрібен звичайний потік — sweep зупиняємо."""
+        self._stop_sweeper()
+        if not self._opened:
+            self._opened = self._try_open()
+
+    def _fast_scan_step(self) -> None:
+        from . import sweep
+        sd = self.cfg.sdr
+        if self._opened:
+            try:
+                self.src.close()               # hackrf_sweep потрібен вільний HackRF
+            except Exception:  # noqa: BLE001
+                pass
+            self._opened = False
+        if self.sweeper is None or not self.sweeper.alive():
+            if self.sweeper is not None:
+                err = self.sweeper.error or "hackrf_sweep зупинився"
+                self._stop_sweeper()
+                self._sweep_fail_until = time.time() + 60
+                self.stats["last_error"] = f"Швидкий огляд недоступний: {err} — звичайне сканування"
+                log.warning(self.stats["last_error"])
+                return
+            lo = min(p.start_hz for p in self.panoramas)
+            hi = max(p.stop_hz for p in self.panoramas)
+            self.sweeper = sweep.Sweeper(lo, hi, sd.sweep_bin_hz, self.gain[0], self.gain[1], self.gain[2],
+                                         cmd=list(sd.sweep_cmd) or None)
+            try:
+                self.sweeper.start()
+            except OSError as e:
+                self.sweeper = None
+                self._sweep_fail_until = time.time() + 60
+                self.stats["last_error"] = f"hackrf_sweep не запустився: {e}"
+                return
+        try:
+            spec, sweep_s = self.sweeper.sweeps.get(timeout=1.0)
+        except queue.Empty:
+            return
+        self._apply_sweep(spec, sweep_s)
+
+    def _apply_sweep(self, spec: np.ndarray, sweep_s: float) -> None:
+        """Повний прохід sweep → панорами, виявлення, трекінг (як _sweep, але без перебудов приймача)."""
+        d = self.cfg.dsp
+        sw = self.sweeper
+        f_sw = sw.freqs()
+        full = np.nan_to_num(spec, nan=-140.0) + float(getattr(self.cfg.sdr, "sweep_offset_db", 0.0))
+        pending: list[Track] = []
+        t0 = time.time()
+        for pano in self.panoramas:
+            n = len(pano.spec)
+            seg = np.interp(pano.freqs(slice(0, n)), f_sw, full).astype(np.float32)
+            pano.spec[:] = seg
+            pano.peak_hold[:] = np.maximum(pano.peak_hold - 0.2, seg)
+            floor = pano.floor.update(slice(0, n), seg)
+            pano.sweeps += 1
+            pano.pass_s = sweep_s
+            if pano.static_db is not None and pano.learn_left > 0:
+                pano.static_db[:] = np.where(np.isnan(pano.static_db), seg, np.maximum(pano.static_db, seg))
+                pano.learn_left -= 1
+                self._publish_spectrum(pano)
+                continue
+            if pano.static_db is not None:
+                stat = np.nan_to_num(pano.static_db, nan=-300.0)
+                stat = np.maximum.reduce([stat, np.roll(stat, 1), np.roll(stat, -1), np.roll(stat, 2), np.roll(stat, -2)])
+                floor = np.maximum(floor, stat - 4.0)
+            dets = spectrum.detect(seg, floor, pano.freqs(slice(0, n)), d.threshold_db, d.min_bandwidth_hz)
+            dets = spectrum.absorb_satellites(spectrum.merge_edge_detections(dets))
+            timeout = max(d.lost_timeout_s, 3 * max(sweep_s, 0.5))
+            pending += self.tracker.update(dets, pano.name, pano.start_hz, pano.stop_hz, 0.0, lost_timeout_s=timeout)
+            for t in self.tracker.tracks.values():
+                if t.range_name == pano.name and t.state == "confirmed":
+                    self._update_distance(t)
+            self._publish_spectrum(pano)
+            self._store_waterfall(pano)
+        self._flush_events()
+        self.stats["sweep_s"] = round(sweep_s, 3)
+        self.stats["sweeps"] += 1
+        self.stats["fast_sweep"] = True
+        self._publish_signals()
+        # Нові сигнали без класифікації — коротка перевірка звичайним потоком (відео? керування?)
+        need = [t for t in pending if t.classification is None]
+        if need and time.time() - self._last_verify > 3.0:
+            self._last_verify = time.time()
+            self._ensure_soapy()
+            if self._opened:
+                need.sort(key=lambda t: -t.bandwidth_hz)      # широкі (відео) — першими
+                for t in need[:3]:
+                    self._analyze(t)
+                self._flush_events()
+                self._publish_signals()
+        self.stats["apply_s"] = round(time.time() - t0, 3)
 
     def _recover(self) -> None:
         # Приймач «відвалився» (USB) — позначаємо закритим; цикл сам перевідкриє його через _try_open

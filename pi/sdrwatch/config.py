@@ -35,6 +35,13 @@ class SdrConfig:
     ppm: float = 0.0
     # Формат потоку з SDR: auto (CS8, якщо це рідний формат, як у HackRF) | CS8 | CF32
     stream_format: str = "auto"
+    # Швидкий огляд ефіру режимом sweep прошивки HackRF (hackrf_sweep): увесь діапазон за частки секунди
+    fast_sweep: bool = True
+    sweep_bin_hz: float = 100e3
+    # Поправка рівнів hackrf_sweep до шкали звичайного потоку, дБ (для відстані / RSSI)
+    sweep_offset_db: float = 0.0
+    # Інша команда замість hackrf_sweep (для тестів / нестандартного встановлення)
+    sweep_cmd: list = field(default_factory=list)
     # Зовнішній ВЧ-тракт: список шляхів {name, start_hz, stop_hz, gpio:{pin:0/1}, bias_tee, lo_hz, gain_db}
     # (див. frontend.py і docs/HARDWARE.md). Порожньо — антена напряму в SDR.
     frontend: list = field(default_factory=list)
