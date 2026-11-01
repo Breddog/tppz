@@ -12,6 +12,7 @@ import '../notify_settings.dart';
 import '../widgets/signal_widgets.dart';
 import '../widgets/spectrum_view.dart';
 import 'control_tab.dart';
+import 'df_screen.dart';
 import 'history_tab.dart';
 import 'signal_detail_screen.dart';
 import 'video_tab.dart';
@@ -36,6 +37,24 @@ class _DeviceScreenState extends State<DeviceScreen> {
   final _watchReq = ValueNotifier<double?>(null);
   final _listenReq = ValueNotifier<double?>(null);
 
+  void _onMaskAlarm() {
+    if (!mounted) return;
+    final hz = live.maskAlarmHz;
+    if (_ns?.isQuietNow != true) {
+      HapticFeedback.vibrate();
+      SystemSound.play(SystemSoundType.alert);
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: Colors.deepPurple,
+        content: Text('Перевищено маску: ${hz == null ? '' : '${(hz / 1e6).toStringAsFixed(2)} МГц'}'),
+        action: hz == null
+            ? null
+            : SnackBarAction(label: 'Відео', textColor: Colors.white, onPressed: () => _watchFreq(hz)),
+      ),
+    );
+  }
+
   void _watchFreq(double hz) {
     setState(() => _tab = 0);
     _watchReq.value = hz;
@@ -55,6 +74,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
   void initState() {
     super.initState();
     NotifySettings.load().then((v) => _ns = v);
+    live.maskAlarm.addListener(_onMaskAlarm);
     _evSub = live.events.listen((e) {
       if (!mounted || e['kind'] != 'new') return;
       final s = Signal(e['track'] as Map<String, dynamic>);
@@ -180,7 +200,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
 // ---------------------------------------------------------------------------------------
 // Вкладка «Ефір»: спектр із рівнем шуму / водоспад + підказки
 
-enum ViewMode { spectrum, waterfall, both }
+enum ViewMode { spectrum, waterfall, both, multi }
 
 class LiveTab extends StatefulWidget {
   const LiveTab({super.key, required this.onSignal, this.onWatchFreq, this.onListenFreq});
@@ -291,6 +311,11 @@ class _LiveTabState extends State<LiveTab> {
                       icon: Icon(Icons.view_agenda_outlined, size: 18),
                       tooltip: 'Спектр + водоспад',
                     ),
+                    ButtonSegment(
+                      value: ViewMode.multi,
+                      icon: Icon(Icons.grid_view, size: 18),
+                      tooltip: 'Кілька діапазонів',
+                    ),
                   ],
                   selected: {_mode},
                   onSelectionChanged: (s) => setState(() => _mode = s.first),
@@ -304,27 +329,13 @@ class _LiveTabState extends State<LiveTab> {
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                tooltip: 'Жести',
-                icon: const Icon(Icons.help_outline),
-                onPressed: () => showDialog<void>(
+                tooltip: 'Інструменти: криві, маска, діапазони, CSV, вигляд',
+                icon: Icon(Icons.tune, color: sel != null && l.masks.containsKey(sel) ? Colors.purpleAccent : null),
+                onPressed: () => showModalBottomSheet<void>(
                   context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('Жести'),
-                    content: const Text(
-                      '• Два пальці — масштаб\n• Тягнути — прокрутка частот\n• Утримати — маркер: «Відео тут» / '
-                      '«Слухати тут»\n• Подвійний дотик — увесь діапазон\n• Водоспад угору/вниз — історія\n'
-                      '• Дотик по сигналу — деталі',
-                    ),
-                    actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Зрозуміло'))],
-                  ),
+                  isScrollControlled: true,
+                  builder: (_) => _ToolsSheet(live: l, range: sel, onRedraw: () => setState(() {})),
                 ),
-              ),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                tooltip: 'Рівні, палітра, згладжування',
-                icon: const Icon(Icons.palette_outlined),
-                onPressed: () =>
-                    showModalBottomSheet<void>(context: context, builder: (_) => const _SpectrumSettings()),
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
@@ -349,6 +360,16 @@ class _LiveTabState extends State<LiveTab> {
           child: ValueListenableBuilder<int>(
             valueListenable: l.spectrumTick,
             builder: (context, _, _) {
+              if (_mode == ViewMode.multi) {
+                return _MultiBand(
+                  live: l,
+                  onPick: (r) => setState(() {
+                    _mode = ViewMode.both;
+                    l.followWatch = r < 0;
+                    if (r >= 0) l.selectRange(r);
+                  }),
+                );
+              }
               final frame = sel == null ? null : l.spectra[sel];
               if (frame == null) {
                 return Center(
@@ -386,6 +407,10 @@ class _LiveTabState extends State<LiveTab> {
                       marker: _marker,
                       vfo: vfo,
                       vfoBw: vfoBw,
+                      maxTrace: SpectrumPrefs.showMax ? l.maxHold[sel] : null,
+                      avgTrace: SpectrumPrefs.showAvg ? l.average[sel] : null,
+                      mask: l.masks[sel],
+                      exceed: l.maskExceed[sel],
                     ),
                     child: const SizedBox.expand(),
                   );
@@ -438,7 +463,7 @@ class _LiveTabState extends State<LiveTab> {
                       child: switch (_mode) {
                         ViewMode.spectrum => spec,
                         ViewMode.waterfall => wf,
-                        ViewMode.both => Column(
+                        ViewMode.both || ViewMode.multi => Column(
                           children: [
                             Expanded(flex: 5, child: spec),
                             const SizedBox(height: 4),
@@ -491,6 +516,22 @@ class _LiveTabState extends State<LiveTab> {
                     onPressed: () {
                       Navigator.pop(ctx);
                       widget.onListenFreq?.call(hz);
+                    },
+                  ),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.explore),
+                    label: const Text('Пеленг тут'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChangeNotifierProvider.value(
+                            value: l,
+                            child: DfScreen(api: l.api, freqHz: hz),
+                          ),
+                        ),
+                      );
                     },
                   ),
                   OutlinedButton.icon(
@@ -761,6 +802,250 @@ class _ScanParamsState extends State<ScanParams> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Пресети діапазонів (як у Spectrozir): тап — збільшити цю ділянку в «Ефірі».
+const _bandPresets = <(String, double, double)>[
+  ('FPV 5.8 ГГц', 5645, 5945),
+  ('FPV 1.2–1.3 ГГц', 1080, 1360),
+  ('FPV 3.3 ГГц', 3300, 3500),
+  ('Wi-Fi 2.4 ГГц', 2400, 2484),
+  ('Wi-Fi 5 ГГц', 5150, 5850),
+  ('ISM 433 МГц', 433.05, 434.79),
+  ('ISM 868 МГц', 863, 870),
+  ('ISM 915 МГц', 902, 928),
+  ('LTE 800', 791, 862),
+  ('LTE 1800', 1710, 1880),
+  ('LTE 2600', 2500, 2690),
+  ('GSM 900', 880, 960),
+  ('GNSS L1 (GPS)', 1565, 1586),
+  ('PMR446', 446.0, 446.2),
+  ('Авіадіапазон', 118, 137),
+];
+
+/// Інструменти «Ефіру»: криві максимум/середнє, маска порогу з тривогою, пресети, CSV, вигляд, жести.
+class _ToolsSheet extends StatefulWidget {
+  const _ToolsSheet({required this.live, required this.range, required this.onRedraw});
+
+  final LiveConnection live;
+  final int? range;
+  final VoidCallback onRedraw;
+
+  @override
+  State<_ToolsSheet> createState() => _ToolsSheetState();
+}
+
+class _ToolsSheetState extends State<_ToolsSheet> {
+  double _margin = 6;
+
+  @override
+  Widget build(BuildContext context) {
+    final l = widget.live;
+    final r = widget.range;
+    final hasMask = r != null && l.masks.containsKey(r);
+    void redraw(VoidCallback f) {
+      setState(f);
+      widget.onRedraw();
+      l.spectrumTick.value++;
+    }
+
+    return SafeArea(
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.75,
+        maxChildSize: 0.95,
+        builder: (context, sc) => ListView(
+          controller: sc,
+          padding: const EdgeInsets.all(16),
+          children: [
+            const Text('Криві', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Максимум за весь час (червона)'),
+              value: SpectrumPrefs.showMax,
+              onChanged: (v) => redraw(() => SpectrumPrefs.showMax = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Середнє (зелена)'),
+              value: SpectrumPrefs.showAvg,
+              onChanged: (v) => redraw(() => SpectrumPrefs.showAvg = v),
+            ),
+            if (r != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.restart_alt),
+                  label: const Text('Скинути криві'),
+                  onPressed: () => redraw(() => l.resetTraces(r)),
+                ),
+              ),
+            const Divider(),
+            const Text('Маска порогу (тривога)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const Text(
+              'Запам\'ятати фон цього діапазону + запас. Коли сигнал перевищить маску — вібрація, звук і червона '
+              'позначка на спектрі. Зручно, щоб помітити появу нового передавача.',
+              style: TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+            Row(
+              children: [
+                Text('Запас +${_margin.round()} дБ'),
+                Expanded(
+                  child: Slider(
+                    value: _margin,
+                    min: 3,
+                    max: 20,
+                    divisions: 17,
+                    onChanged: (v) => setState(() => _margin = v),
+                  ),
+                ),
+              ],
+            ),
+            Wrap(
+              spacing: 8,
+              children: [
+                FilledButton.icon(
+                  icon: const Icon(Icons.policy_outlined),
+                  label: Text(hasMask ? 'Вивчити заново' : 'Вивчити фон і ввімкнути'),
+                  onPressed: r == null ? null : () => redraw(() => l.learnMask(r, _margin)),
+                ),
+                if (hasMask)
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.close),
+                    label: const Text('Прибрати маску'),
+                    onPressed: () => redraw(() => l.clearMask(r)),
+                  ),
+              ],
+            ),
+            const Divider(),
+            const Text('Діапазони', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final p in _bandPresets)
+                  ActionChip(
+                    label: Text(p.$1),
+                    onPressed: () {
+                      Navigator.pop(context);
+                      l.focusFreq((p.$2 + p.$3) / 2 * 1e6, span: (p.$3 - p.$2) * 1e6 * 1.1);
+                    },
+                  ),
+              ],
+            ),
+            const Text(
+              'Показується, якщо цей діапазон сканує модуль (Керування → Діапазони або «Повний діапазон SDR»).',
+              style: TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+            const Divider(),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.table_view),
+              title: const Text('Скопіювати знімок спектра (CSV)'),
+              subtitle: const Text('частота; рівень; шум; максимум; середнє — вставте в таблицю або повідомлення'),
+              onTap: r == null
+                  ? null
+                  : () {
+                      Clipboard.setData(ClipboardData(text: l.spectrumCsv(r)));
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CSV скопійовано')));
+                    },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.palette_outlined),
+              title: const Text('Рівні, палітра, згладжування'),
+              onTap: () {
+                Navigator.pop(context);
+                showModalBottomSheet<void>(context: context, builder: (_) => const _SpectrumSettings());
+              },
+            ),
+            const ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              leading: Icon(Icons.help_outline),
+              title: Text('Жести'),
+              children: [
+                Text(
+                  '• Два пальці — масштаб\n• Тягнути — прокрутка частот\n• Утримати — маркер: «Відео тут», '
+                  '«Слухати тут», «Пеленг тут»\n• Подвійний дотик — увесь діапазон\n• Водоспад угору/вниз — історія\n'
+                  '• Дотик по сигналу — деталі',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Кілька діапазонів одночасно (як «до 5 смуг» у Spectrozir PRO): маленькі живі спектри.
+class _MultiBand extends StatelessWidget {
+  const _MultiBand({required this.live, required this.onPick});
+
+  final LiveConnection live;
+  final void Function(int range) onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final keys = live.spectra.keys.where((k) => k != -2).toList()
+      ..sort((a, b) => (a < 0 ? -100 + a : a).compareTo(b < 0 ? -100 + b : b));
+    if (keys.isEmpty) {
+      return const Center(child: Text('Немає даних', style: TextStyle(color: Colors.white54)));
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(6, 4, 6, 8),
+      children: [
+        for (final k in keys)
+          Card(
+            margin: const EdgeInsets.only(bottom: 6),
+            child: InkWell(
+              onTap: () => onPick(k),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            live.spectra[k]!.name.isEmpty ? 'Діапазон $k' : live.spectra[k]!.name,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                          ),
+                        ),
+                        if ((live.maskExceed[k] ?? const []).isNotEmpty)
+                          const Icon(Icons.warning_amber, size: 16, color: Colors.redAccent),
+                        Text(
+                          '${(live.spectra[k]!.fStart / 1e6).toStringAsFixed(0)}–'
+                          '${(live.spectra[k]!.fStop / 1e6).toStringAsFixed(0)} МГц',
+                          style: const TextStyle(color: Colors.white54, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                    SizedBox(
+                      height: 92,
+                      child: CustomPaint(
+                        painter: SpectrumPainter(
+                          frame: live.spectra[k]!,
+                          peak: null,
+                          signals: const [],
+                          showPeak: false,
+                          mask: live.masks[k],
+                          exceed: live.maskExceed[k],
+                        ),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

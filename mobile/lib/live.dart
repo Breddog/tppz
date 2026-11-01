@@ -44,6 +44,18 @@ class LiveConnection extends ChangeNotifier {
   final Map<int, SpectrumFrame> zoomSpectra = {};
   final Map<int, List<Float32List>> waterfall = {};
   final Map<int, Float32List> peakHold = {};
+
+  /// Максимум за весь час (не спадає, доки не скинути) і середнє — як криві max/avg у Spectrozir.
+  final Map<int, Float32List> maxHold = {};
+  final Map<int, Float32List> average = {};
+
+  /// Маска порогу (рівень на кожну точку кадру). Перевищення — тривога.
+  final Map<int, Float32List> masks = {};
+
+  /// Точки, де зараз перевищено маску (для підсвічування), і сигнал тривоги.
+  final Map<int, List<int>> maskExceed = {};
+  final ValueNotifier<int> maskAlarm = ValueNotifier(0);
+  double? maskAlarmHz;
   final Map<int, ViewWindow> views = {};
   int? selectedRange;
 
@@ -161,6 +173,46 @@ class LiveConnection extends ChangeNotifier {
     spectrumTick.value++;
   }
 
+  DateTime _lastMaskAlarm = DateTime(2000);
+
+  /// Маска з поточного максимуму + запас (дБ): «вивчити фон» перед спостереженням.
+  void learnMask(int range, double marginDb) {
+    final src = maxHold[range] ?? spectra[range]?.bins;
+    if (src == null) return;
+    masks[range] = Float32List.fromList([for (final v in src) v + marginDb]);
+    maskExceed.remove(range);
+    spectrumTick.value++;
+  }
+
+  void clearMask(int range) {
+    masks.remove(range);
+    maskExceed.remove(range);
+    spectrumTick.value++;
+  }
+
+  void resetTraces(int range) {
+    maxHold.remove(range);
+    average.remove(range);
+    peakHold.remove(range);
+    spectrumTick.value++;
+  }
+
+  /// Знімок спектра у CSV (частота МГц; рівень; шум; максимум; середнє).
+  String spectrumCsv(int range) {
+    final f = spectra[range];
+    if (f == null) return '';
+    final mx = maxHold[range], av = average[range];
+    final b = StringBuffer('freq_mhz;level_db;floor_db;max_db;avg_db\n');
+    for (var i = 0; i < f.bins.length; i++) {
+      b.writeln(
+        '${(f.freqAt(i) / 1e6).toStringAsFixed(4)};${f.bins[i].toStringAsFixed(1)};${f.floor[i].toStringAsFixed(1)};'
+        '${mx != null && mx.length == f.bins.length ? mx[i].toStringAsFixed(1) : ''};'
+        '${av != null && av.length == f.bins.length ? av[i].toStringAsFixed(1) : ''}',
+      );
+    }
+    return b.toString();
+  }
+
   /// Оновити стан після відповіді API (напр. зміна підсилення).
   void updateStatus(Map<String, dynamic> patch) {
     status = {...status, ...patch};
@@ -204,7 +256,10 @@ class LiveConnection extends ChangeNotifier {
       if ((prev.fStart - f.fStart).abs() > tol || (prev.fStop - f.fStop).abs() > tol) {
         waterfall.remove(f.range);
         peakHold.remove(f.range);
+        maxHold.remove(f.range);
+        average.remove(f.range);
         zoomSpectra.remove(f.range);
+        if (masks[f.range]?.length != f.bins.length) masks.remove(f.range);
       }
     }
     // Згладжування лінії (як «averaging» у SDR++): лише для того самого вікна частот
@@ -227,6 +282,42 @@ class LiveConnection extends ChangeNotifier {
     } else {
       for (var i = 0; i < row.length; i++) {
         ph[i] = row[i] > ph[i] ? row[i] : ph[i] - 0.15;
+      }
+    }
+    final mx = maxHold[f.range], av = average[f.range];
+    if (mx == null || mx.length != row.length) {
+      maxHold[f.range] = Float32List.fromList(row);
+      average[f.range] = Float32List.fromList(row);
+    } else {
+      for (var i = 0; i < row.length; i++) {
+        if (row[i] > mx[i]) mx[i] = row[i];
+        av![i] += (row[i] - av[i]) * 0.05;
+      }
+    }
+    // Маска: де рівень вище — тривога (не частіше разу на 3 с)
+    final m = masks[f.range];
+    if (m != null && m.length == row.length) {
+      final ex = <int>[];
+      var worst = -1;
+      var worstD = 0.0;
+      for (var i = 0; i < row.length; i++) {
+        final d = row[i] - m[i];
+        if (d > 0) {
+          ex.add(i);
+          if (d > worstD) {
+            worstD = d;
+            worst = i;
+          }
+        }
+      }
+      maskExceed[f.range] = ex;
+      if (worst >= 0) {
+        final now = DateTime.now();
+        if (now.difference(_lastMaskAlarm).inMilliseconds > 3000) {
+          _lastMaskAlarm = now;
+          maskAlarmHz = f.freqAt(worst);
+          maskAlarm.value++;
+        }
       }
     }
     spectrumTick.value++;
@@ -287,6 +378,7 @@ class LiveConnection extends ChangeNotifier {
     _ch?.sink.close();
     _events.close();
     spectrumTick.dispose();
+    maskAlarm.dispose();
     super.dispose();
   }
 }

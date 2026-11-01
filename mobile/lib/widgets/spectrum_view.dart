@@ -67,6 +67,9 @@ class SpectrumPrefs {
   /// Згладжування лінії спектра 0..0.9 (експоненційне усереднення кадрів).
   static double smoothing = 0.5;
 
+  /// Криві «максимум» і «середнє».
+  static bool showMax = false, showAvg = false;
+
   static void notify() {
     changed.value++;
     save();
@@ -138,6 +141,10 @@ class SpectrumPainter extends CustomPainter {
     this.marker,
     this.vfo,
     this.vfoBw = 0,
+    this.maxTrace,
+    this.avgTrace,
+    this.mask,
+    this.exceed,
     this.repaint,
   }) : super(repaint: repaint);
 
@@ -153,6 +160,10 @@ class SpectrumPainter extends CustomPainter {
   /// Поточна частота приймача (відео/звук) і її смуга — як «VFO» у SDR++/gqrx.
   final double? vfo;
   final double vfoBw;
+
+  /// Криві «максимум за весь час» і «середнє», маска порогу та точки її перевищення (індекси кадру).
+  final Float32List? maxTrace, avgTrace, mask;
+  final List<int>? exceed;
   final Listenable? repaint;
 
   static const leftPad = 34.0;
@@ -269,6 +280,25 @@ class SpectrumPainter extends CustomPainter {
           ..strokeWidth = 1,
       );
     }
+    final n0 = frame.bins.length;
+    if (!useZoom && maxTrace != null && maxTrace!.length == n0) {
+      canvas.drawPath(
+        series(maxTrace!),
+        Paint()
+          ..color = Colors.redAccent.withValues(alpha: 0.7)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+    if (!useZoom && avgTrace != null && avgTrace!.length == n0) {
+      canvas.drawPath(
+        series(avgTrace!, mean: true),
+        Paint()
+          ..color = Colors.lightGreenAccent.withValues(alpha: 0.8)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
     canvas.drawPath(
       line,
       Paint()
@@ -276,6 +306,21 @@ class SpectrumPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.2,
     );
+    if (!useZoom && mask != null && mask!.length == n0) {
+      canvas.drawPath(
+        series(mask!, mean: true),
+        Paint()
+          ..color = Colors.purpleAccent
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.4,
+      );
+      final ex = exceed ?? const [];
+      final red = Paint()..color = Colors.redAccent;
+      for (final i in ex) {
+        final px = fx(frame.freqAt(i));
+        if (px >= leftPad && px <= size.width) canvas.drawRect(Rect.fromLTWH(px - 1, 0, 3, 8), red);
+      }
+    }
     canvas.drawPath(
       series(f.floor, mean: true),
       Paint()
