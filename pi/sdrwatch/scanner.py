@@ -21,7 +21,7 @@ import numpy as np
 
 from . import channels as ch
 from . import distance as dist
-from .dsp import classifier, spectrum, video
+from .dsp import baseband, classifier, spectrum, video
 from .frontend import FrontEnd
 from .hub import Hub
 from .imaging import ClipWriter, encode
@@ -306,7 +306,8 @@ class Engine:
             self._audio_active = False
             self.src.set_sample_rate(self.cfg.sdr.sample_rate)
 
-    def set_video_autoscan(self, on: bool, bands: list[str] | None = None) -> dict:
+    def set_video_autoscan(self, on: bool, bands: list[str] | None = None, circular: bool = True,
+                           dwell_s: float = 4.0) -> dict:
         """Автоскан відео: перебирати аналогові канали, зупинятися на картинці."""
         if not on:
             if self.watch_status:
@@ -326,7 +327,9 @@ class Engine:
             raise ValueError("Немає каналів для автоскану")
         if self.mode != "watch":
             self.set_mode("watch", freqs[0])
-        self.watch_status["autoscan"] = {"freqs": freqs, "idx": 0, "found": {}, "last_video": 0.0}
+        self.watch_status["autoscan"] = {"freqs": freqs, "idx": 0, "found": {}, "last_video": 0.0,
+                                         "circular": bool(circular), "dwell_s": float(dwell_s),
+                                         "arrived": time.time(), "rounds": 0}
         self.watch_freq = freqs[0]
         return {"autoscan": True, "channels": len(freqs)}
 
@@ -861,40 +864,71 @@ class Engine:
         d = self.cfg.dsp
         f = self.watch_freq
         self._tune(f)
-        iq = self._read(int(fs * d.video_capture_s))
+        # Телефон декодує сам (канал «baseband»): Pi лише дискримінатор + проріджування — швидко.
+        phone = self.hub.count("baseband") > 0
+        legacy = self.hub.count("video") > 0 or self.recording
+        cap = baseband.FIELD_S if (phone and not legacy) else d.video_capture_s
+        iq = self._read(int(fs * cap))
         self._agc(iq)
-        s = spectrum.remove_dc(spectrum.psd_db(iq[: d.fft_size * (d.averages + 1)], d.fft_size, d.averages))
-        s = s + self.gain_offset_db
-        floor = spectrum.local_floor(s)
-        freqs = f + (np.arange(len(s)) - len(s) / 2 + 0.5) * fs / len(s)
-        self.hub.publish("live", self._spectrum_msg(-1, "Стеження", freqs[0], freqs[-1], s, floor))
+        self._watch_n = getattr(self, "_watch_n", 0) + 1
+        if not phone or self._watch_n % 3 == 0:     # спектр — не щокадру, щоб не гальмувати відео
+            s = spectrum.remove_dc(spectrum.psd_db(iq[: d.fft_size * (d.averages + 1)], d.fft_size, d.averages))
+            s = s + self.gain_offset_db
+            floor = spectrum.local_floor(s)
+            freqs = f + (np.arange(len(s)) - len(s) / 2 + 0.5) * fs / len(s)
+            self.hub.publish("live", self._spectrum_msg(-1, "Стеження", freqs[0], freqs[-1], s, floor))
 
-        res = video.demodulate(iq, fs, 0.0, force_invert=self.video_opts["invert"],
-                               auto_contrast=self.video_opts["auto_contrast"],
-                               descramble=self.video_opts["descramble"])
+        info = None
+        if phone:
+            # Не частіше MAX_FPS: швидкий Pi інакше «заллє» мережу полями, яких екран не встигне показати
+            wait = 1 / baseband.MAX_FPS - (time.monotonic() - getattr(self, "_bb_last", 0.0))
+            if wait > 0:
+                time.sleep(wait)
+            self._bb_last = time.monotonic()
+            n_field = int(fs * baseband.FIELD_S)
+            pkt, info = baseband.make_packet(iq[:n_field], fs, f, self.hub.option("baseband", "quality", "normal"))
+            self.hub.publish("baseband", pkt)
+        if legacy:
+            res = video.demodulate(iq, fs, 0.0, force_invert=self.video_opts["invert"],
+                                   auto_contrast=self.video_opts["auto_contrast"],
+                                   descramble=self.video_opts["descramble"])
+            # ЗАВЖДИ віддаємо кадр: є відео — картинка, немає — реальний сніг
+            img = res.image if (res.is_video and res.image is not None) else video.raw_raster(iq, fs)
+            data, mime = encode(img)
+            self.hub.publish("video", data)
+            if self.recording:
+                if self.clip is None or self.clip.full:
+                    self._close_clip()
+                    self.clip = ClipWriter(self.storage, f, "Запис стеження", max_s=self.cfg.storage.video_clip_s)
+                self.clip.add(data, mime)
+            vinfo = res.to_dict()
+        else:
+            vinfo = info or video.VideoResult().to_dict()
+        if info is not None and legacy:
+            vinfo = {**vinfo, "decoder": "phone", "fs_out": info["fs_out"], "kbps": info["kbps"]}
+        res = _VInfo(vinfo)
         st = self.watch_status
         now = time.time()
         manual = st.get("manual", False)   # ручне сканування повзунком — без «полювання»
-        # ЗАВЖДИ віддаємо кадр: є відео — картинка, немає — реальний сніг (ніколи не чорний/синій екран)
-        img = res.image if (res.is_video and res.image is not None) else video.raw_raster(iq, fs)
-        data, mime = encode(img)
-        self.hub.publish("video", data)
-        if self.recording:
-            if self.clip is None or self.clip.full:
-                self._close_clip()
-                self.clip = ClipWriter(self.storage, f, "Запис стеження", max_s=self.cfg.storage.video_clip_s)
-            self.clip.add(data, mime)
-
         auto = st.get("autoscan")
         if auto:
+            arrived = auto.setdefault("arrived", now)
+            nxt = False
             if res.is_video:
                 auto["last_video"] = now
                 m0 = ch.match_channel(f, kind="analog")
                 key = m0.channel.name if m0 else f"{f / 1e6:.0f}"     # групуємо за каналом (AFC трохи «гуляє»)
                 auto["found"][key] = round(f / 1e6, 1)
-            elif now - auto["last_video"] > 1.5:
-                # Немає картинки — наступний канал (з картинкою стоїмо, поки вона є)
+                # Круговий режим: показати картинку dwell_s і йти далі по колу; інакше стояти, поки є відео
+                nxt = auto.get("circular") and now - arrived > auto.get("dwell_s", 4.0)
+            elif now - max(auto["last_video"], arrived) > auto.get("empty_s", 0.35):
+                nxt = True    # порожній канал — далі (час на канал ≈ кілька полів відео)
+            if nxt:
                 auto["idx"] = (auto["idx"] + 1) % len(auto["freqs"])
+                if auto["idx"] == 0:
+                    auto["rounds"] = auto.get("rounds", 0) + 1
+                auto["arrived"] = now
+                auto["last_video"] = 0.0
                 self.watch_freq = auto["freqs"][auto["idx"]]
         if res.is_video:
             st["lost_since"] = None
@@ -919,10 +953,12 @@ class Engine:
                     st["hunt"] = None
         m = ch.match_channel(self.watch_freq, kind="analog")
         self.hub.publish("live", {
-            "type": "watch", "freq_hz": round(self.watch_freq), "video": res.to_dict(),
+            "type": "watch", "freq_hz": round(self.watch_freq), "video": vinfo,
             "channel": m.to_dict() if m else None, "recording": self.recording,
             "manual": manual, "searching": bool(st.get("hunt")), "ts": now,
             "autoscan": ({"index": auto["idx"], "total": len(auto["freqs"]),
+                          "circular": bool(auto.get("circular")), "rounds": auto.get("rounds", 0),
+                          "dwell_s": auto.get("dwell_s", 4.0),
                           "found": [{"channel": k, "freq_mhz": v} for k, v in auto["found"].items()]}
                          if auto else None),
         })
@@ -1020,6 +1056,14 @@ class Engine:
         dc.rx_cal_db = dist.calibrate(peak_dbfs, self.src.total_gain_db, freq_hz, distance_m, eirp_dbm,
                                       dc.path_loss_exponent, dc.rx_antenna_gain_dbi)
         return dc.rx_cal_db
+
+
+class _VInfo:
+    """Однаковий доступ до результату повного (Pi) і легкого (для телефона) аналізу."""
+
+    def __init__(self, d: dict) -> None:
+        self.is_video = bool(d.get("is_video"))
+        self.afc_offset_hz = float(d.get("afc_offset_hz") or 0.0)
 
 
 def _downsample_mean(x: np.ndarray, n: int) -> np.ndarray:

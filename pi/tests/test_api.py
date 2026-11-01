@@ -239,3 +239,34 @@ def test_audio_demod_tone():
         fr = np.fft.rfftfreq(len(pcm), 1 / AUDIO_RATE)
         assert abs(fr[np.argmax(sp[5:]) + 5] - 1000) < 20
         assert 3000 < np.abs(pcm).max() < 32767      # чутно і без кліпінгу
+
+
+def test_ws_baseband_streams_raw_video(tmp_path):
+    from sdrwatch.dsp import baseband
+    cfg = Config()
+    cfg._path = str(tmp_path / "config.json")
+    cfg.api.token = "secret"
+    cfg.storage.path = str(tmp_path / "st")
+    hub = Hub()
+    st = Storage(cfg.storage.path, 50)
+    eng = Engine(cfg, SimulatedSource([]), st, None, hub)
+    eng.start()
+    try:
+        c = TestClient(create_app(AppState(cfg, eng, st, hub, "sdr-test")))
+        h = {"Authorization": "Bearer secret"}
+        c.post("/api/control/watch", json={"freq_hz": 5800e6}, headers=h)
+        with c.websocket_connect("/ws/baseband?token=secret&quality=economy") as ws:
+            got = None
+            for _ in range(20):
+                m = ws.receive()
+                if m.get("bytes"):
+                    got = m["bytes"]
+                    break
+            assert got is not None
+            head, hz = baseband.parse_packet(got)
+            assert head["bits"] == 4 and head["n"] > 50000
+        r = c.post("/api/control/video_autoscan", json={"on": True, "bands": ["R"], "circular": True,
+                                                         "dwell_s": 2}, headers=h).json()
+        assert r["autoscan"] and r["channels"] == 8
+    finally:
+        eng.stop()

@@ -67,6 +67,8 @@ class AudioParams(BaseModel):
 class VideoAutoscanReq(BaseModel):
     on: bool
     bands: list[str] | None = None
+    circular: bool = True
+    dwell_s: float = 4.0
 
 
 class WifiReq(BaseModel):
@@ -403,7 +405,7 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/control/video_autoscan", dependencies=[Depends(require_control)])
     def video_autoscan(req: VideoAutoscanReq):
         try:
-            return st.engine.set_video_autoscan(req.on, req.bands)
+            return st.engine.set_video_autoscan(req.on, req.bands, req.circular, req.dwell_s)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
@@ -570,6 +572,33 @@ def create_app(app_state) -> FastAPI:
                     await ws.send_json({"type": "ping"})
                     continue
                 await ws.send_bytes(frame)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            st.hub.unsubscribe(sub)
+
+    @app.websocket("/ws/baseband")
+    async def ws_baseband(ws: WebSocket, token: str | None = None, quality: str = "normal"):
+        """Сирий відеосигнал після ЧМ-дискримінатора (див. dsp/baseband.py) — декодує телефон.
+
+        quality: economy (≈3 Мвідл/с, 4 біти) | normal (≈4 Мвідл/с, 8 біт) | detail (≈6.7 Мвідл/с).
+        """
+        try:
+            check_token(token)
+        except HTTPException:
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        sub = st.hub.subscribe("baseband", maxsize=2)   # затримка важливіша за повноту: старі поля викидаємо
+        sub.options["quality"] = quality
+        try:
+            while True:
+                try:
+                    pkt = await asyncio.wait_for(sub.q.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    await ws.send_json({"type": "ping"})
+                    continue
+                await ws.send_bytes(pkt)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

@@ -67,7 +67,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
   Future<void> watchSignal(Signal s) async {
     try {
       await api.watch(trackId: s.id, freqHz: s.freqHz);
-      setState(() => _tab = 2);
+      setState(() => _tab = 0);
     } catch (e) {
       _toast(e.toString());
     }
@@ -117,9 +117,10 @@ class _DeviceScreenState extends State<DeviceScreen> {
         body: IndexedStack(
           index: _tab,
           children: [
+            // Відео — головний екран (відкривається першим)
+            VideoTab(api: api, active: _tab == 0),
             LiveTab(onSignal: openSignal),
             SignalsTab(onSignal: openSignal, onWatch: watchSignal),
-            VideoTab(api: api, active: _tab == 2),
             HistoryTab(api: api),
             ControlTab(api: api, device: widget.device),
           ],
@@ -129,6 +130,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
           onDestinationSelected: (i) => setState(() => _tab = i),
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           destinations: [
+            const NavigationDestination(icon: Icon(Icons.videocam_outlined), label: 'Відео'),
             const NavigationDestination(icon: Icon(Icons.ssid_chart), label: 'Ефір'),
             NavigationDestination(
               icon: Consumer<LiveConnection>(
@@ -139,7 +141,6 @@ class _DeviceScreenState extends State<DeviceScreen> {
               ),
               label: 'Сигнали',
             ),
-            const NavigationDestination(icon: Icon(Icons.videocam_outlined), label: 'Відео'),
             const NavigationDestination(icon: Icon(Icons.history), label: 'Історія'),
             const NavigationDestination(icon: Icon(Icons.tune), label: 'Керування'),
           ],

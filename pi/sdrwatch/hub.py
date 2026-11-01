@@ -49,6 +49,14 @@ class Hub:
         with self._lock:
             return sum(1 for s in self._subs if s.channel == channel)
 
+    def option(self, channel: str, key: str, default: Any = None) -> Any:
+        """Параметр, який передав клієнт каналу (перший, у кого він заданий)."""
+        with self._lock:
+            for s in self._subs:
+                if s.channel == channel and s.options.get(key) is not None:
+                    return s.options[key]
+        return default
+
     def publish(self, channel: str, item: Any, filt=None) -> None:
         """Викликається з будь-якого потоку."""
         with self._lock:
