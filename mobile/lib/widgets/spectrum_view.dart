@@ -40,14 +40,25 @@ Color paletteColor(double t) {
 
 /// Діапазон шкали дБ: від шуму до найсильнішого піку.
 (double, double) dbRange(SpectrumFrame f) {
-  final fl = List<double>.from(f.floor)..sort();
+  final fl = Float32List.fromList(f.floor)..sort();
   final noise = fl.isEmpty ? -110.0 : fl[fl.length ~/ 2];
-  final peak = f.bins.fold<double>(-200, math.max);
+  var peak = -200.0;
+  for (final v in f.bins) {
+    if (v > peak) peak = v;
+  }
   final lo = noise - 8;
   final hi = math.max(noise + 30, peak + 5);
   return (lo, hi);
 }
 
+String fmtMhz(double hz, double span) {
+  final mhz = hz / 1e6;
+  final dec = span < 2e6 ? 3 : (span < 20e6 ? 2 : (span < 200e6 ? 1 : 0));
+  return mhz.toStringAsFixed(dec);
+}
+
+/// Спектр. [lo]/[hi] — видима ділянка (масштаб), за замовчуванням — увесь кадр.
+/// Якщо є [zoom]-кадр, що покриває ділянку, малюється він (вища деталізація).
 class SpectrumPainter extends CustomPainter {
   SpectrumPainter({
     required this.frame,
@@ -55,46 +66,58 @@ class SpectrumPainter extends CustomPainter {
     required this.signals,
     this.showPeak = true,
     this.highlightId,
-  });
+    this.lo,
+    this.hi,
+    this.zoom,
+    this.marker,
+    this.repaint,
+  }) : super(repaint: repaint);
 
   final SpectrumFrame frame;
   final Float32List? peak;
   final List<Signal> signals;
   final bool showPeak;
   final String? highlightId;
+  final double? lo, hi;
+  final SpectrumFrame? zoom;
+  final double? marker;
+  final Listenable? repaint;
 
   static const leftPad = 34.0;
   static const bottomPad = 18.0;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final (lo, hi) = dbRange(frame);
+    final vLo = lo ?? frame.fStart, vHi = hi ?? frame.fStop;
+    final z = zoom;
+    final useZoom = z != null && z.fStart <= vLo + (vHi - vLo) * 0.02 && z.fStop >= vHi - (vHi - vLo) * 0.02;
+    final f = useZoom ? z : frame;
+    final (dLo, dHi) = dbRange(frame);
     final w = size.width - leftPad;
     final h = size.height - bottomPad;
-    final n = frame.bins.length;
-    double x(int i) => leftPad + i / (n - 1) * w;
-    double y(double db) => (h * (1 - (db - lo) / (hi - lo))).clamp(0.0, h);
-    double fx(double hz) => leftPad + (hz - frame.fStart) / (frame.fStop - frame.fStart) * w;
+    double y(double db) => (h * (1 - (db - dLo) / (dHi - dLo))).clamp(0.0, h);
+    double fx(double hz) => leftPad + (hz - vLo) / (vHi - vLo) * w;
 
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, 0, size.width, size.height));
     // Сітка та шкала
     final grid = Paint()
       ..color = Colors.white10
       ..strokeWidth = 1;
     const labelStyle = TextStyle(color: Colors.white54, fontSize: 10);
-    final step = ((hi - lo) / 5 / 5).ceil() * 5.0;
-    for (var db = (lo / step).ceil() * step; db < hi; db += step) {
+    final step = ((dHi - dLo) / 5 / 5).ceil() * 5.0;
+    for (var db = (dLo / step).ceil() * step; db < dHi; db += step) {
       canvas.drawLine(Offset(leftPad, y(db)), Offset(size.width, y(db)), grid);
       _text(canvas, db.toStringAsFixed(0), Offset(2, y(db) - 6), labelStyle);
     }
     for (var k = 0; k <= 4; k++) {
-      final f = frame.fStart + (frame.fStop - frame.fStart) * k / 4;
+      final hz = vLo + (vHi - vLo) * k / 4;
       final px = leftPad + w * k / 4;
       canvas.drawLine(Offset(px, 0), Offset(px, h), grid);
-      final t = (f / 1e6).toStringAsFixed(0);
-      _text(canvas, t, Offset((px - 14).clamp(leftPad, size.width - 30), h + 3), labelStyle);
+      _text(canvas, fmtMhz(hz, vHi - vLo), Offset((px - 16).clamp(leftPad, size.width - 44), h + 3), labelStyle);
     }
 
-    // Маркери знайдених сигналів (кольорові смуги по ширині сигналу)
+    // Маркери знайдених сигналів
     for (final s in signals) {
       final c = s.cls;
       final a = fx(s.freqHz - s.bandwidthHz / 2), b = fx(s.freqHz + s.bandwidthHz / 2);
@@ -114,41 +137,55 @@ class SpectrumPainter extends CustomPainter {
       );
     }
 
-    // Рівень шуму й поріг виявлення
-    final floorPath = Path();
-    final thrPath = Path();
-    for (var i = 0; i < frame.floor.length; i++) {
-      final px = leftPad + i / (frame.floor.length - 1) * w;
-      if (i == 0) {
-        floorPath.moveTo(px, y(frame.floor[i]));
-        thrPath.moveTo(px, y(frame.floor[i] + frame.thresholdDb));
-      } else {
-        floorPath.lineTo(px, y(frame.floor[i]));
-        thrPath.lineTo(px, y(frame.floor[i] + frame.thresholdDb));
+    // Лінії по пікселях: для кожного стовпця — максимум бінів (швидко навіть для 2048+ точок)
+    final cols = w.floor().clamp(2, 4000);
+    Path series(Float32List data, {bool fill = false, double add = 0, bool mean = false}) {
+      final p = Path();
+      final n = data.length;
+      var started = false;
+      for (var c = 0; c < cols; c++) {
+        final hz0 = vLo + (vHi - vLo) * c / cols, hz1 = vLo + (vHi - vLo) * (c + 1) / cols;
+        var i0 = ((hz0 - f.fStart) / (f.fStop - f.fStart) * (n - 1)).floor();
+        var i1 = ((hz1 - f.fStart) / (f.fStop - f.fStart) * (n - 1)).ceil();
+        if (i1 < 0 || i0 > n - 1) continue;
+        i0 = i0.clamp(0, n - 1);
+        i1 = i1.clamp(i0, n - 1);
+        var v = mean ? 0.0 : -999.0;
+        for (var i = i0; i <= i1; i++) {
+          if (mean) {
+            v += data[i];
+          } else if (data[i] > v) {
+            v = data[i];
+          }
+        }
+        if (mean) v /= (i1 - i0 + 1);
+        final px = leftPad + c * w / cols, py = y(v + add);
+        if (!started) {
+          p.moveTo(px, py);
+          started = true;
+        } else {
+          p.lineTo(px, py);
+        }
       }
+      if (fill) {
+        p
+          ..lineTo(leftPad + w, h)
+          ..lineTo(leftPad, h)
+          ..close();
+      }
+      return p;
     }
 
-    // Спектр із заливкою
-    final line = Path()..moveTo(x(0), y(frame.bins[0]));
-    for (var i = 1; i < n; i++) {
-      line.lineTo(x(i), y(frame.bins[i]));
-    }
-    final fill = Path.from(line)
-      ..lineTo(x(n - 1), h)
-      ..lineTo(x(0), h)
-      ..close();
+    final line = series(f.bins);
+    final fillPath = series(f.bins, fill: true);
     canvas.drawPath(
-      fill,
+      fillPath,
       Paint()
-        ..shader = ui.Gradient.linear(Offset(0, 0), Offset(0, h), [const Color(0xAA00E5FF), const Color(0x2200E5FF)]),
+        ..shader = ui.Gradient.linear(Offset.zero, Offset(0, h), [const Color(0xAA00E5FF), const Color(0x2200E5FF)]),
     );
-    if (showPeak && peak != null && peak!.length == n) {
-      final pp = Path()..moveTo(x(0), y(peak![0]));
-      for (var i = 1; i < n; i++) {
-        pp.lineTo(x(i), y(peak![i]));
-      }
+    if (showPeak && peak != null && peak!.length == frame.bins.length && !useZoom) {
       canvas.drawPath(
-        pp,
+        series(peak!),
         Paint()
           ..color = Colors.orangeAccent.withValues(alpha: 0.55)
           ..style = PaintingStyle.stroke
@@ -163,19 +200,45 @@ class SpectrumPainter extends CustomPainter {
         ..strokeWidth = 1.2,
     );
     canvas.drawPath(
-      floorPath,
+      series(f.floor, mean: true),
       Paint()
         ..color = Colors.white38
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1,
     );
     canvas.drawPath(
-      thrPath,
+      series(f.floor, mean: true, add: f.thresholdDb),
       Paint()
         ..color = Colors.yellowAccent.withValues(alpha: 0.35)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1,
     );
+    if (marker != null && marker! >= vLo && marker! <= vHi) {
+      final mx = fx(marker!);
+      canvas.drawLine(
+        Offset(mx, 0),
+        Offset(mx, h),
+        Paint()
+          ..color = Colors.redAccent
+          ..strokeWidth = 1.5,
+      );
+      final i = f.indexOf(marker!).clamp(0, f.bins.length - 1);
+      _text(
+        canvas,
+        '${fmtMhz(marker!, 1e5)} МГц  ${f.bins[i].toStringAsFixed(0)} дБ',
+        Offset((mx + 4).clamp(leftPad, size.width - 150), 14),
+        const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold),
+      );
+    }
+    if (useZoom) {
+      _text(
+        canvas,
+        'деталізація ×${((frame.fStop - frame.fStart) / (z.fStop - z.fStart)).toStringAsFixed(0)}',
+        Offset(leftPad + 4, h - 14),
+        const TextStyle(color: Colors.white38, fontSize: 10),
+      );
+    }
+    canvas.restore();
   }
 
   void _text(Canvas c, String s, Offset o, TextStyle st) {
@@ -187,17 +250,34 @@ class SpectrumPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant SpectrumPainter old) =>
-      old.frame != frame || old.signals != signals || old.highlightId != highlightId || old.showPeak != showPeak;
+  bool shouldRepaint(covariant SpectrumPainter old) => true;
 }
 
 /// Водоспад: кожен рядок — один прохід спектра, новіші зверху.
+/// Зображення оновлюється ПОРЯДКОВО (новий рядок фарбується, решта лише зсувається),
+/// а не перемальовується цілком на кожен кадр.
 class WaterfallView extends StatefulWidget {
-  const WaterfallView({super.key, required this.rows, required this.frame, required this.signals});
+  const WaterfallView({
+    super.key,
+    required this.rows,
+    required this.frame,
+    required this.signals,
+    this.lo,
+    this.hi,
+    this.rowOffset = 0,
+    this.visibleRows = 220,
+    this.repaint,
+  });
 
   final List<Float32List> rows;
   final SpectrumFrame frame;
   final List<Signal> signals;
+  final double? lo, hi;
+
+  /// Прокрутка назад у часі: скільки найновіших рядків пропустити.
+  final int rowOffset;
+  final int visibleRows;
+  final Listenable? repaint;
 
   @override
   State<WaterfallView> createState() => _WaterfallViewState();
@@ -205,37 +285,79 @@ class WaterfallView extends StatefulWidget {
 
 class _WaterfallViewState extends State<WaterfallView> {
   ui.Image? _img;
+  Uint32List? _px;
+  int _w = 0, _h = 0;
+  Float32List? _lastTop;
+  double _lo = 0, _hi = 1;
   int _building = 0;
-
-  @override
-  void didUpdateWidget(covariant WaterfallView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _rebuild();
-  }
 
   @override
   void initState() {
     super.initState();
-    _rebuild();
+    widget.repaint?.addListener(_update);
+    _update();
   }
 
-  void _rebuild() {
-    final rows = widget.rows;
-    if (rows.isEmpty) return;
-    final width = rows.first.length;
-    final height = rows.length;
-    final (lo, hi) = dbRange(widget.frame);
-    final px = Uint32List(width * height);
-    for (var r = 0; r < height; r++) {
-      final row = rows[r];
-      if (row.length != width) continue;
-      for (var i = 0; i < width; i++) {
-        final t = (row[i] - lo) / (hi - lo);
-        px[r * width + i] = _palette[(t.clamp(0.0, 1.0) * 255).toInt()];
-      }
+  @override
+  void didUpdateWidget(covariant WaterfallView old) {
+    super.didUpdateWidget(old);
+    if (old.repaint != widget.repaint) {
+      old.repaint?.removeListener(_update);
+      widget.repaint?.addListener(_update);
     }
+    if (old.rowOffset != widget.rowOffset || old.visibleRows != widget.visibleRows || old.rows != widget.rows) {
+      _px = null; // повне перемальовування
+    }
+    _update();
+  }
+
+  @override
+  void dispose() {
+    widget.repaint?.removeListener(_update);
+    _img?.dispose();
+    super.dispose();
+  }
+
+  void _paintRow(Float32List row, int r) {
+    final px = _px!;
+    final k = 255 / (_hi - _lo);
+    final base = r * _w;
+    for (var i = 0; i < _w; i++) {
+      final t = (row[i] - _lo) * k;
+      px[base + i] = _palette[t < 0 ? 0 : (t > 255 ? 255 : t.toInt())];
+    }
+  }
+
+  void _update() {
+    final rows = widget.rows;
+    if (rows.isEmpty || !mounted) return;
+    final width = rows.first.length;
+    final int start = widget.rowOffset.clamp(0, math.max(0, rows.length - 1)).toInt();
+    final height = math.min(widget.visibleRows, rows.length - start);
+    if (height <= 0) return;
+    final (lo, hi) = dbRange(widget.frame);
+    // Шкала змінилась помітно — перефарбувати все; інакше лише новий рядок
+    final rescale = (lo - _lo).abs() > 4 || (hi - _hi).abs() > 4;
+    if (_px == null || _w != width || _h != height || rescale || widget.rowOffset > 0) {
+      _w = width;
+      _h = height;
+      _lo = lo;
+      _hi = hi;
+      _px = Uint32List(width * height);
+      for (var r = 0; r < height; r++) {
+        if (rows[start + r].length == width) _paintRow(rows[start + r], r);
+      }
+    } else if (!identical(rows.first, _lastTop)) {
+      // новий рядок: зсунути все на рядок униз і пофарбувати верхній
+      final px = _px!;
+      px.setRange(width, width * height, px, 0);
+      _paintRow(rows.first, 0);
+    } else {
+      return;
+    }
+    _lastTop = rows.first;
     final token = ++_building;
-    ui.decodeImageFromPixels(px.buffer.asUint8List(), width, height, ui.PixelFormat.rgba8888, (img) {
+    ui.decodeImageFromPixels(Uint8List.sublistView(_px!), width, height, ui.PixelFormat.rgba8888, (img) {
       if (!mounted || token != _building) {
         img.dispose();
         return;
@@ -248,47 +370,55 @@ class _WaterfallViewState extends State<WaterfallView> {
   }
 
   @override
-  void dispose() {
-    _img?.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return CustomPaint(painter: _WaterfallPainter(_img, widget.frame, widget.signals), child: const SizedBox.expand());
+    return CustomPaint(
+      painter: _WaterfallPainter(_img, widget.frame, widget.signals, widget.lo, widget.hi, widget.rowOffset),
+      child: const SizedBox.expand(),
+    );
   }
 }
 
 class _WaterfallPainter extends CustomPainter {
-  _WaterfallPainter(this.img, this.frame, this.signals);
+  _WaterfallPainter(this.img, this.frame, this.signals, this.lo, this.hi, this.rowOffset);
 
   final ui.Image? img;
   final SpectrumFrame frame;
   final List<Signal> signals;
+  final double? lo, hi;
+  final int rowOffset;
 
   @override
   void paint(Canvas canvas, Size size) {
     const left = SpectrumPainter.leftPad;
     final w = size.width - left;
+    final vLo = lo ?? frame.fStart, vHi = hi ?? frame.fStop;
     canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFF05071A));
     if (img != null) {
-      canvas.drawImageRect(
-        img!,
-        Rect.fromLTWH(0, 0, img!.width.toDouble(), img!.height.toDouble()),
-        Rect.fromLTWH(left, 0, w, size.height),
-        Paint()..filterQuality = FilterQuality.low,
-      );
+      // Видима ділянка — відповідні стовпці зображення
+      final span = frame.fStop - frame.fStart;
+      final sx0 = ((vLo - frame.fStart) / span * img!.width).clamp(0.0, img!.width.toDouble());
+      final sx1 = ((vHi - frame.fStart) / span * img!.width).clamp(0.0, img!.width.toDouble());
+      if (sx1 > sx0) {
+        final dx0 = left + (frame.fStart + sx0 / img!.width * span - vLo) / (vHi - vLo) * w;
+        final dx1 = left + (frame.fStart + sx1 / img!.width * span - vLo) / (vHi - vLo) * w;
+        canvas.drawImageRect(
+          img!,
+          Rect.fromLTRB(sx0, 0, sx1, img!.height.toDouble()),
+          Rect.fromLTRB(dx0, 0, dx1, size.height),
+          Paint()..filterQuality = FilterQuality.low,
+        );
+      }
     }
     final tick = Paint()..strokeWidth = 2;
     for (final s in signals.where((s) => s.active)) {
-      final x = left + (s.freqHz - frame.fStart) / (frame.fStop - frame.fStart) * w;
+      final x = left + (s.freqHz - vLo) / (vHi - vLo) * w;
       if (x < left || x > size.width) continue;
       tick.color = classColor(s.cls?.code);
       canvas.drawLine(Offset(x, 0), Offset(x, 10), tick);
     }
     const st = TextStyle(color: Colors.white38, fontSize: 9);
     final tp = TextPainter(
-      text: const TextSpan(text: 'зараз', style: st),
+      text: TextSpan(text: rowOffset > 0 ? '−$rowOffset рядків (потягніть угору — до «зараз»)' : 'зараз', style: st),
       textDirection: TextDirection.ltr,
     )..layout();
     tp.paint(canvas, const Offset(2, 2));
@@ -300,5 +430,5 @@ class _WaterfallPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _WaterfallPainter old) => old.img != img || old.signals != signals;
+  bool shouldRepaint(covariant _WaterfallPainter old) => true;
 }

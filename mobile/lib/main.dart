@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'announcements.dart';
 import 'api.dart';
+import 'app_update.dart';
 import 'netbind.dart';
 import 'background.dart';
 import 'device_store.dart';
@@ -41,6 +42,17 @@ Future<void> main() async {
     // Фоновий сервіс недоступний (напр. на емуляторі без служб) — застосунок працює і без нього
   }
   runApp(ChangeNotifierProvider.value(value: store, child: const SdrWatchApp()));
+  // Раз на добу — чи є новіша збірка застосунку (через інтернет телефона, модуль не потрібен)
+  AppUpdate.dailyCheck().then((r) {
+    if (r != null) {
+      Notifications.alert(
+        777,
+        'Доступне оновлення SDR Watch',
+        'Збірка ${r.number}. Налаштування (шестерня) → Оновлення застосунку.',
+        high: false,
+      );
+    }
+  });
 }
 
 class SdrWatchApp extends StatelessWidget {

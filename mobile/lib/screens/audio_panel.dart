@@ -7,14 +7,18 @@ import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api.dart';
+import '../audio/audio_demod.dart';
 import '../live.dart';
 import '../widgets/spectrum_view.dart';
 
 /// Звук з ефіру: рації, мовлення, авіація. Модуль демодулює, телефон лише програє (24 кГц, моно).
 class AudioPanel extends StatefulWidget {
-  const AudioPanel({super.key, required this.api});
+  const AudioPanel({super.key, required this.api, this.listenRequest});
 
   final ApiClient api;
+
+  /// Запит «слухати цю частоту» ззовні (зі списку знайденого, з маркера в «Ефірі»), Гц.
+  final ValueNotifier<double?>? listenRequest;
 
   @override
   State<AudioPanel> createState() => _AudioPanelState();
@@ -48,11 +52,25 @@ class _AudioPanelState extends State<AudioPanel> {
   bool _pcmReady = false;
   bool _listening = false;
   int _bytes = 0;
+  final _demod = PhoneAudioDemod();
+  bool _phoneDemod = true; // false — старий модуль: готовий звук з модуля
+  DateTime? _lastPkt;
+  Timer? _fallback;
 
   @override
   void initState() {
     super.initState();
     _initPcm();
+    widget.listenRequest?.addListener(_onRequest);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _onRequest());
+  }
+
+  void _onRequest() {
+    final hz = widget.listenRequest?.value;
+    if (hz == null || !mounted) return;
+    widget.listenRequest!.value = null;
+    _freq.text = (hz / 1e6).toStringAsFixed(5);
+    _listen();
   }
 
   Future<void> _initPcm() async {
@@ -69,6 +87,7 @@ class _AudioPanelState extends State<AudioPanel> {
 
   @override
   void dispose() {
+    widget.listenRequest?.removeListener(_onRequest);
     _closeWs();
     FlutterPcmSound.release().catchError((_) {});
     super.dispose();
@@ -76,6 +95,33 @@ class _AudioPanelState extends State<AudioPanel> {
 
   void _openWs() {
     if (_ws != null) return;
+    if (_phoneDemod) {
+      // Модуль вирізає канал, телефон демодулює (менше затримки, модуль вільніший)
+      _ws = WebSocketChannel.connect(Uri.parse(widget.api.wsUrl('/ws/audioiq')));
+      _sub = _ws!.stream.listen(
+        (data) {
+          if (data is! List<int> || !_pcmReady) return;
+          final b = data is Uint8List ? data : Uint8List.fromList(data);
+          final p = AudioIqPacket.parse(b);
+          if (p == null) return;
+          _lastPkt = DateTime.now();
+          _bytes += b.length;
+          final pcm = _demod.process(p, squelchOpen: p.open);
+          if (pcm.isNotEmpty) FlutterPcmSound.feed(PcmArrayInt16(bytes: ByteData.sublistView(pcm)));
+        },
+        onDone: _closeWs,
+        onError: (_) => _closeWs(),
+      );
+      _fallback?.cancel();
+      _fallback = Timer(const Duration(seconds: 4), () {
+        if (_lastPkt == null && _listening && mounted) {
+          _closeWs();
+          _phoneDemod = false; // модуль старої версії — беремо готовий звук
+          _openWs();
+        }
+      });
+      return;
+    }
     _ws = WebSocketChannel.connect(Uri.parse(widget.api.wsUrl('/ws/audio')));
     _sub = _ws!.stream.listen(
       (data) {
@@ -90,6 +136,7 @@ class _AudioPanelState extends State<AudioPanel> {
   }
 
   void _closeWs() {
+    _fallback?.cancel();
     _sub?.cancel();
     _ws?.sink.close();
     _sub = null;
@@ -275,6 +322,23 @@ class _AudioPanelState extends State<AudioPanel> {
               if (active) _params();
             },
           ),
+        ),
+        Row(
+          children: [
+            const Icon(Icons.volume_up, size: 18, color: Colors.white54),
+            Expanded(
+              child: Slider(
+                value: _demod.volume,
+                min: 0.2,
+                max: 4,
+                onChanged: (v) => setState(() => _demod.volume = v),
+              ),
+            ),
+            Text(
+              _phoneDemod ? 'демодулює телефон' : 'звук з модуля',
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+          ],
         ),
         if (active)
           OutlinedButton.icon(

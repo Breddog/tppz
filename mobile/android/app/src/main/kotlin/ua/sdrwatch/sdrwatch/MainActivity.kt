@@ -1,6 +1,12 @@
 package ua.sdrwatch.sdrwatch
 
+import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import java.io.File
 import android.net.NetworkCapabilities
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -32,6 +38,29 @@ class MainActivity : FlutterActivity() {
                             cm.bindProcessToNetwork(null)
                             result.success(false)
                         }
+                    }
+                    "cacheDir" -> result.success(File(cacheDir, "updates").apply { mkdirs() }.absolutePath)
+                    "canInstall" -> result.success(
+                        Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()
+                    )
+                    "allowInstall" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startActivity(
+                                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                        result.success(true)
+                    }
+                    "installApk" -> {
+                        val f = File(call.argument<String>("path")!!)
+                        val uri = FileProvider.getUriForFile(this, "$packageName.updates", f)
+                        startActivity(
+                            Intent(Intent.ACTION_VIEW)
+                                .setDataAndType(uri, "application/vnd.android.package-archive")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        result.success(true)
                     }
                     "unbind" -> {
                         cm.bindProcessToNetwork(null)

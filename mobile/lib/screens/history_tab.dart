@@ -514,7 +514,7 @@ class _WaterfallHistoryScreenState extends State<WaterfallHistoryScreen> {
         (d!['f_start'] as num).toDouble(),
         (d['f_stop'] as num).toDouble(),
         rows.first,
-        List.filled(rows.first.length, sorted[sorted.length ~/ 4]),
+        Float32List(rows.first.length)..fillRange(0, rows.first.length, sorted[sorted.length ~/ 4]),
         8,
         0,
       );

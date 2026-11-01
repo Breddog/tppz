@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import 'package:provider/provider.dart';
 import '../api.dart';
 import '../live.dart';
 import '../models.dart';
+import '../notify_settings.dart';
 import '../widgets/signal_widgets.dart';
 import '../widgets/spectrum_view.dart';
 import 'control_tab.dart';
@@ -29,15 +31,39 @@ class _DeviceScreenState extends State<DeviceScreen> {
   late final LiveConnection live = LiveConnection(api)..connect();
   int _tab = 0;
   StreamSubscription? _evSub;
+  NotifySettings? _ns;
+  // Переходи між вкладками: «дивитися відео тут» / «слухати тут»
+  final _watchReq = ValueNotifier<double?>(null);
+  final _listenReq = ValueNotifier<double?>(null);
+
+  void _watchFreq(double hz) {
+    setState(() => _tab = 0);
+    _watchReq.value = hz;
+  }
+
+  void _listenFreq(double hz) {
+    setState(() => _tab = 0);
+    _listenReq.value = hz;
+  }
+
+  void _showInEfir(double hz) {
+    live.focusFreq(hz);
+    setState(() => _tab = 1);
+  }
 
   @override
   void initState() {
     super.initState();
+    NotifySettings.load().then((v) => _ns = v);
     _evSub = live.events.listen((e) {
       if (!mounted || e['kind'] != 'new') return;
       final s = Signal(e['track'] as Map<String, dynamic>);
-      if ((s.cls?.priority ?? 0) < 2) return;
-      SystemSound.play(SystemSoundType.alert); // звуковий сигнал про нову знахідку
+      final ns = _ns;
+      if (ns == null || !ns.inApp || !ns.allows(s.cls?.code, s.rssi, s.freqHz)) return;
+      if (!ns.isQuietNow) {
+        if (ns.sound) SystemSound.play(SystemSoundType.alert); // звуковий сигнал про нову знахідку
+        if (ns.vibrate) HapticFeedback.heavyImpact();
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: classColor(s.cls?.code).withValues(alpha: 0.95),
@@ -51,6 +77,8 @@ class _DeviceScreenState extends State<DeviceScreen> {
   @override
   void dispose() {
     _evSub?.cancel();
+    _watchReq.dispose();
+    _listenReq.dispose();
     live.dispose();
     super.dispose();
   }
@@ -64,14 +92,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
     );
   }
 
-  Future<void> watchSignal(Signal s) async {
-    try {
-      await api.watch(trackId: s.id, freqHz: s.freqHz);
-      setState(() => _tab = 0);
-    } catch (e) {
-      _toast(e.toString());
-    }
-  }
+  Future<void> watchSignal(Signal s) async => _watchFreq(s.freqHz);
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
@@ -118,8 +139,14 @@ class _DeviceScreenState extends State<DeviceScreen> {
           index: _tab,
           children: [
             // Відео — головний екран (відкривається першим)
-            VideoTab(api: api, active: _tab == 0),
-            LiveTab(onSignal: openSignal),
+            VideoTab(
+              api: api,
+              active: _tab == 0,
+              watchRequest: _watchReq,
+              listenRequest: _listenReq,
+              onShowInEfir: _showInEfir,
+            ),
+            LiveTab(onSignal: openSignal, onWatchFreq: _watchFreq, onListenFreq: _listenFreq),
             SignalsTab(onSignal: openSignal, onWatch: watchSignal),
             HistoryTab(api: api),
             ControlTab(api: api, device: widget.device),
@@ -156,9 +183,11 @@ class _DeviceScreenState extends State<DeviceScreen> {
 enum ViewMode { spectrum, waterfall, both }
 
 class LiveTab extends StatefulWidget {
-  const LiveTab({super.key, required this.onSignal});
+  const LiveTab({super.key, required this.onSignal, this.onWatchFreq, this.onListenFreq});
 
   final void Function(Signal) onSignal;
+  final void Function(double hz)? onWatchFreq;
+  final void Function(double hz)? onListenFreq;
 
   @override
   State<LiveTab> createState() => _LiveTabState();
@@ -168,27 +197,35 @@ class _LiveTabState extends State<LiveTab> {
   ViewMode _mode = ViewMode.both;
   bool _peak = true;
   String? _highlight;
+  double? _marker;
+  int _rowOffset = 0;
+  // жест масштабу
+  ViewWindow? _startView;
+  double _startFocusHz = 0;
+  double _graphWidth = 1;
+
+  ViewWindow _view(LiveConnection l, int sel, SpectrumFrame f) => l.views[sel] ?? ViewWindow(f.fStart, f.fStop);
+
+  double _hzAt(double dx, ViewWindow v) {
+    final w = _graphWidth - SpectrumPainter.leftPad;
+    return v.lo + ((dx - SpectrumPainter.leftPad) / w).clamp(0.0, 1.0) * v.span;
+  }
+
+  ViewWindow _clamp(ViewWindow v, SpectrumFrame f) {
+    final full = f.fStop - f.fStart;
+    final minSpan = math.max(full / 2048 * 16, 20e3);
+    var span = v.span.clamp(minSpan, full);
+    var lo = v.lo.clamp(f.fStart, f.fStop - span);
+    return ViewWindow(lo, lo + span);
+  }
 
   @override
   Widget build(BuildContext context) {
     final l = context.watch<LiveConnection>();
     final ranges = ((l.status['ranges'] as List?) ?? const []).cast<Map<String, dynamic>>();
     final watching = l.spectra.containsKey(-1) && (l.status['mode'] == 'watch' || l.watch != null);
-    final sel = watching ? -1 : l.selectedRange;
-    final frame = sel == null ? null : l.spectra[sel];
-    final inRange = frame == null
-        ? <Signal>[]
-        : l.signals
-              .where((s) => s.freqHz + s.bandwidthHz / 2 >= frame.fStart && s.freqHz - s.bandwidthHz / 2 <= frame.fStop)
-              .toList();
-    double? peakHz;
-    if (frame != null && frame.bins.isNotEmpty) {
-      var bi = 0;
-      for (var i = 1; i < frame.bins.length; i++) {
-        if (frame.bins[i] > frame.bins[bi]) bi = i;
-      }
-      peakHz = frame.fStart + (frame.fStop - frame.fStart) * bi / (frame.bins.length - 1);
-    }
+    // Під час стеження за замовчуванням — його спектр, але можна вибрати й інший діапазон
+    final sel = (watching && (l.followWatch || l.selectedRange == null)) ? -1 : l.selectedRange;
 
     return Column(
       children: [
@@ -200,17 +237,25 @@ class _LiveTabState extends State<LiveTab> {
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             children: [
               if (watching)
-                const Padding(
-                  padding: EdgeInsets.only(right: 6),
-                  child: Chip(avatar: Icon(Icons.gps_fixed, size: 16), label: Text('Стеження')),
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ChoiceChip(
+                    avatar: const Icon(Icons.gps_fixed, size: 16),
+                    label: const Text('Стеження'),
+                    selected: sel == -1,
+                    onSelected: (_) => setState(() => l.followWatch = true),
+                  ),
                 ),
               for (final r in ranges)
                 Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: ChoiceChip(
                     label: Text(r['name'] as String),
-                    selected: !watching && sel == r['index'],
-                    onSelected: (_) => l.selectRange(r['index'] as int),
+                    selected: sel == r['index'],
+                    onSelected: (_) {
+                      setState(() => l.followWatch = false);
+                      l.selectRange(r['index'] as int);
+                    },
                   ),
                 ),
             ],
@@ -241,18 +286,30 @@ class _LiveTabState extends State<LiveTab> {
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                tooltip: 'Скинути піки',
-                icon: const Icon(Icons.restart_alt),
-                onPressed: l.clearPeaks,
+                tooltip: 'Увесь діапазон (скинути масштаб)',
+                icon: const Icon(Icons.zoom_out_map),
+                onPressed: sel == null
+                    ? null
+                    : () {
+                        l.setView(sel, null);
+                        setState(() {
+                          _rowOffset = 0;
+                          _marker = null;
+                        });
+                      },
               ),
             ],
           ),
         ),
-        ScanParams(status: l.status, frame: frame),
+        ScanParams(status: l.status, frame: sel == null ? null : l.spectra[sel]),
         Expanded(
           flex: 6,
-          child: frame == null
-              ? Center(
+          child: ValueListenableBuilder<int>(
+            valueListenable: l.spectrumTick,
+            builder: (context, _, _) {
+              final frame = sel == null ? null : l.spectra[sel];
+              if (frame == null) {
+                return Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -265,54 +322,171 @@ class _LiveTabState extends State<LiveTab> {
                       ),
                     ],
                   ),
-                )
-              : GestureDetector(
-                  onTapUp: (d) => _tap(context, d.localPosition, frame, inRange),
-                  child: LayoutBuilder(
-                    builder: (context, c) {
-                      final spec = CustomPaint(
-                        painter: SpectrumPainter(
-                          frame: frame,
-                          peak: _peak ? l.peakHold[sel] : null,
-                          signals: inRange,
-                          showPeak: _peak,
-                          highlightId: _highlight,
-                        ),
-                        child: const SizedBox.expand(),
-                      );
-                      final wf = WaterfallView(rows: l.waterfall[sel] ?? const [], frame: frame, signals: inRange);
-                      return Padding(
-                        padding: const EdgeInsets.fromLTRB(4, 4, 8, 0),
-                        child: switch (_mode) {
-                          ViewMode.spectrum => spec,
-                          ViewMode.waterfall => wf,
-                          ViewMode.both => Column(
-                            children: [
-                              Expanded(flex: 5, child: spec),
-                              const SizedBox(height: 4),
-                              Expanded(flex: 4, child: wf),
-                            ],
-                          ),
-                        },
-                      );
+                );
+              }
+              final v = _view(l, sel!, frame);
+              final inRange = l.signals
+                  .where((s) => s.freqHz + s.bandwidthHz / 2 >= v.lo && s.freqHz - s.bandwidthHz / 2 <= v.hi)
+                  .toList();
+              return LayoutBuilder(
+                builder: (context, c) {
+                  _graphWidth = c.maxWidth - 12;
+                  final spec = CustomPaint(
+                    painter: SpectrumPainter(
+                      frame: frame,
+                      peak: _peak ? l.peakHold[sel] : null,
+                      signals: inRange,
+                      showPeak: _peak,
+                      highlightId: _highlight,
+                      lo: v.lo,
+                      hi: v.hi,
+                      zoom: l.zoomSpectra[sel],
+                      marker: _marker,
+                    ),
+                    child: const SizedBox.expand(),
+                  );
+                  final wf = WaterfallView(
+                    rows: l.waterfall[sel] ?? const [],
+                    frame: frame,
+                    signals: inRange,
+                    lo: v.lo,
+                    hi: v.hi,
+                    rowOffset: _rowOffset,
+                    repaint: l.spectrumTick,
+                  );
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapUp: (d) => _tap(d.localPosition, v, inRange),
+                    onDoubleTap: () {
+                      l.setView(sel, null);
+                      setState(() {
+                        _rowOffset = 0;
+                        _marker = null;
+                      });
                     },
-                  ),
-                ),
+                    onLongPressStart: (d) => _markerAt(context, l, _hzAt(d.localPosition.dx - 4, v)),
+                    onScaleStart: (d) {
+                      _startView = v;
+                      _startFocusHz = _hzAt(d.localFocalPoint.dx - 4, v);
+                    },
+                    onScaleUpdate: (d) {
+                      final s0 = _startView;
+                      if (s0 == null) return;
+                      if (d.pointerCount == 1 &&
+                          _mode != ViewMode.spectrum &&
+                          d.focalPointDelta.dy.abs() > d.focalPointDelta.dx.abs() * 1.5) {
+                        // вертикально по водоспаду — назад/вперед у часі
+                        final rows = (l.waterfall[sel]?.length ?? 0);
+                        setState(
+                          () =>
+                              _rowOffset = (_rowOffset - d.focalPointDelta.dy.round()).clamp(0, math.max(0, rows - 20)),
+                        );
+                        return;
+                      }
+                      final span = s0.span / d.horizontalScale.clamp(0.05, 50);
+                      final w = _graphWidth - SpectrumPainter.leftPad;
+                      final rel = ((d.localFocalPoint.dx - 4 - SpectrumPainter.leftPad) / w).clamp(0.0, 1.0);
+                      final lo = _startFocusHz - rel * span;
+                      l.setView(sel, _clamp(ViewWindow(lo, lo + span), frame));
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 4, 8, 0),
+                      child: switch (_mode) {
+                        ViewMode.spectrum => spec,
+                        ViewMode.waterfall => wf,
+                        ViewMode.both => Column(
+                          children: [
+                            Expanded(flex: 5, child: spec),
+                            const SizedBox(height: 4),
+                            Expanded(flex: 4, child: wf),
+                          ],
+                        ),
+                      },
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(10, 2, 10, 2),
+          child: Text(
+            'Два пальці — масштаб · тягнути — прокрутка · утримати — маркер · подвійний дотик — увесь діапазон · '
+            'водоспад угору/вниз — історія',
+            style: TextStyle(color: Colors.white38, fontSize: 10.5),
+          ),
         ),
         const Divider(height: 1),
         Expanded(
           flex: 3,
-          child: HintsPanel(signals: inRange.isEmpty ? l.signals : inRange, peakHz: peakHz, onTap: widget.onSignal),
+          child: HintsPanel(signals: l.signals, peakHz: null, onTap: widget.onSignal),
         ),
       ],
     );
   }
 
-  void _tap(BuildContext context, Offset p, SpectrumFrame f, List<Signal> sigs) {
-    final box = context.size;
-    if (box == null || sigs.isEmpty) return;
-    final w = box.width - 12 - SpectrumPainter.leftPad;
-    final hz = f.fStart + (p.dx - 4 - SpectrumPainter.leftPad) / w * (f.fStop - f.fStart);
+  void _markerAt(BuildContext context, LiveConnection l, double hz) {
+    setState(() => _marker = hz);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${(hz / 1e6).toStringAsFixed(3)} МГц',
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    icon: const Icon(Icons.videocam),
+                    label: const Text('Відео тут'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      widget.onWatchFreq?.call(hz);
+                    },
+                  ),
+                  FilledButton.tonalIcon(
+                    icon: const Icon(Icons.headphones),
+                    label: const Text('Слухати тут'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      widget.onListenFreq?.call(hz);
+                    },
+                  ),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.zoom_in),
+                    label: const Text('Збільшити тут'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      final f = l.spectra[l.selectedRange ?? -1];
+                      final sel = l.spectra.containsKey(-1) && l.watch != null ? -1 : l.selectedRange;
+                      if (sel != null && f != null) {
+                        final span = _view(l, sel, f).span / 4;
+                        l.setView(sel, _clamp(ViewWindow(hz - span / 2, hz + span / 2), f));
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _tap(Offset p, ViewWindow v, List<Signal> sigs) {
+    if (sigs.isEmpty) return;
+    final hz = _hzAt(p.dx - 4, v);
     Signal? best;
     var bestD = double.infinity;
     for (final s in sigs) {
@@ -322,7 +496,7 @@ class _LiveTabState extends State<LiveTab> {
         best = s;
       }
     }
-    if (best != null && bestD < (f.fStop - f.fStart) * 0.03) {
+    if (best != null && bestD < v.span * 0.03) {
       setState(() => _highlight = best!.id);
       widget.onSignal(best);
     }

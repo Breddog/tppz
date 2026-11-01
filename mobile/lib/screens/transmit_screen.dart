@@ -205,11 +205,48 @@ class _TransmitScreenState extends State<TransmitScreen> {
           ),
         ),
         if (!allowed)
-          const Padding(
-            padding: EdgeInsets.all(12),
-            child: Text(
-              'Передавання вимкнено в налаштуваннях модуля (tx.allow). Увімкніть його, якщо впевнені.',
-              style: TextStyle(color: Colors.redAccent),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Передавання на модулі вимкнено (так за замовчуванням — щоб випадково не вийти в ефір).',
+                  style: TextStyle(color: Colors.redAccent),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.lock_open),
+                  label: const Text('Дозволити передавання на цьому модулі'),
+                  onPressed: () async {
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Дозволити передавання?'),
+                        content: const Text(
+                          'HackRF зможе випромінювати сигнал. Вихід в ефір — ваша відповідальність: '
+                          'використовуйте мінімальну потужність і лише для перевірки своїх приймачів.',
+                        ),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Скасувати')),
+                          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Дозволити')),
+                        ],
+                      ),
+                    );
+                    if (ok != true) return;
+                    try {
+                      await widget.api.put('/api/config', {
+                        'tx': {'allow': true},
+                      });
+                      await _refresh();
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+                      }
+                    }
+                  },
+                ),
+              ],
             ),
           ),
         const SizedBox(height: 6),

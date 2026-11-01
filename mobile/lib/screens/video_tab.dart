@@ -18,10 +18,26 @@ import 'audio_panel.dart';
 /// виправляє полярність, дескремблює, накопичує слабкі сигнали й малює. Без сигналу — справжній сніг.
 /// Старий модуль (без /ws/baseband) — автоматично показуємо готові кадри з модуля (JPEG).
 class VideoTab extends StatefulWidget {
-  const VideoTab({super.key, required this.api, required this.active});
+  const VideoTab({
+    super.key,
+    required this.api,
+    required this.active,
+    this.watchRequest,
+    this.listenRequest,
+    this.onShowInEfir,
+  });
 
   final ApiClient api;
   final bool active;
+
+  /// Запит «показати відео на цій частоті» ззовні (Ефір, список сигналів), Гц.
+  final ValueNotifier<double?>? watchRequest;
+
+  /// Запит «слухати цю частоту» ззовні, Гц — перемикає на «Звук».
+  final ValueNotifier<double?>? listenRequest;
+
+  /// Показати частоту на спектрі («Ефір»).
+  final void Function(double hz)? onShowInEfir;
 
   @override
   State<VideoTab> createState() => _VideoTabState();
@@ -51,7 +67,15 @@ class _VideoTabState extends State<VideoTab> {
   bool _started = false;
   bool _autoStart = true; // відкрили вкладку, а модуль не дивиться відео — одразу круговий автоскан
   bool _circular = true;
-  double _dwell = 4;
+  double _dwell = 3;
+  String _scanMode = 'grids'; // grids | full | range
+  bool _modeSynced = false; // підхопити режим, у якому вже працює модуль
+  bool _scanAudio = true;
+  final _fromCtl = TextEditingController(text: '900');
+  final _toCtl = TextEditingController(text: '1400');
+  // Мініатюри підтвердженого відео: ключ — частота, МГц (округлена до 1)
+  final Map<int, ui.Image> _thumbs = {};
+  final Map<int, DateTime> _thumbAt = {};
   String _section = 'video'; // 'video' | 'audio'
   final Set<String> _scanBands = {'R', 'F', 'A', 'B', 'E', '1G2', '3G3'};
   Timer? _tuneDebounce;
@@ -70,7 +94,43 @@ class _VideoTabState extends State<VideoTab> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    widget.watchRequest?.addListener(_onWatchRequest);
+    widget.listenRequest?.addListener(_onListenRequest);
+  }
+
+  void _onWatchRequest() {
+    final hz = widget.watchRequest?.value;
+    if (hz == null || !mounted) return;
+    widget.watchRequest!.value = null;
+    _goVideo(hz);
+  }
+
+  void _onListenRequest() {
+    if (widget.listenRequest?.value == null || !mounted) return;
+    _close();
+    setState(() => _section = 'audio'); // AudioPanel сам підхопить запит
+  }
+
+  /// Перейти на відео на частоті: зупинити автоскан і стежити за нею.
+  Future<void> _goVideo(double hz) async {
+    final auto = context.read<LiveConnection>().watch?['autoscan'];
+    if (auto != null) await _autoscan(false);
+    setState(() {
+      _section = 'video';
+      _started = true;
+    });
+    _tune(hz / 1e6, immediate: true);
+  }
+
+  @override
   void dispose() {
+    widget.watchRequest?.removeListener(_onWatchRequest);
+    widget.listenRequest?.removeListener(_onListenRequest);
+    for (final t in _thumbs.values) {
+      t.dispose();
+    }
     _tuneDebounce?.cancel();
     _close();
     _img.value?.dispose();
@@ -145,11 +205,51 @@ class _VideoTabState extends State<VideoTab> {
       }
       final old = _img.value;
       _img.value = img;
+      _maybeThumb(f, p.freqHz);
       old?.dispose();
       final wasLocked = _stats?.locked;
       _stats = f.stats;
       if (wasLocked != f.stats.locked) setState(() {});
     });
+  }
+
+  /// Зберегти мініатюру впевнено розпізнаного відео (раз на 3 с для частоти) — для списку знайденого.
+  void _maybeThumb(DecodedFrame f, double freqHz) {
+    if (!f.stats.locked || f.stats.syncScore < 0.7) return;
+    final key = (freqHz / 1e6).round();
+    final now = DateTime.now();
+    if (now.difference(_thumbAt[key] ?? DateTime(2000)).inSeconds < 3) return;
+    _thumbAt[key] = now;
+    // зменшена копія: кожен 2-й піксель по горизонталі й вертикалі
+    final w = f.width ~/ 2, h = f.height ~/ 2;
+    final px = Uint8List(w * h * 4);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        final si = ((y * 2) * f.width + x * 2) * 4, di = (y * w + x) * 4;
+        px[di] = f.rgba[si];
+        px[di + 1] = f.rgba[si + 1];
+        px[di + 2] = f.rgba[si + 2];
+        px[di + 3] = 255;
+      }
+    }
+    ui.decodeImageFromPixels(px, w, h, ui.PixelFormat.rgba8888, (img) {
+      if (!mounted) {
+        img.dispose();
+        return;
+      }
+      setState(() {
+        _thumbs[key]?.dispose();
+        _thumbs[key] = img;
+      });
+    });
+  }
+
+  ui.Image? _thumbFor(double mhz) {
+    for (final d in const [0, 1, -1, 2, -2]) {
+      final t = _thumbs[mhz.round() + d];
+      if (t != null) return t;
+    }
+    return null;
   }
 
   void _close() {
@@ -200,6 +300,10 @@ class _VideoTabState extends State<VideoTab> {
       'bands': _scanBands.toList(),
       'circular': _circular,
       'dwell_s': _dwell,
+      'mode': _scanMode,
+      'audio': _scanAudio,
+      if (_scanMode == 'range') 'start_hz': (double.tryParse(_fromCtl.text.replaceAll(',', '.')) ?? 900) * 1e6,
+      if (_scanMode == 'range') 'stop_hz': (double.tryParse(_toCtl.text.replaceAll(',', '.')) ?? 1400) * 1e6,
     }),
   );
 
@@ -215,26 +319,17 @@ class _VideoTabState extends State<VideoTab> {
   }
 
   void _fullscreen() {
-    SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    Navigator.of(context)
-        .push(
-          MaterialPageRoute(
-            builder: (_) => Scaffold(
-              backgroundColor: Colors.black,
-              body: GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: Center(
-                  child: AspectRatio(aspectRatio: 4 / 3, child: _screen()),
-                ),
-              ),
-            ),
-          ),
-        )
-        .then((_) {
-          SystemChrome.setPreferredOrientations([]);
-          SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-        });
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _FullscreenVideo(
+          screen: _screen,
+          freq: () => _freqMhz,
+          onStep: (d) => _tune(_freqMhz + d, immediate: true),
+          stats: () => _stats,
+        ),
+      ),
+    );
   }
 
   /// Саме зображення: оновлюється саме по собі (без перебудови всієї вкладки на кожен кадр).
@@ -281,7 +376,9 @@ class _VideoTabState extends State<VideoTab> {
       return Column(
         children: [
           sectionSwitch,
-          Expanded(child: AudioPanel(api: widget.api)),
+          Expanded(
+            child: AudioPanel(api: widget.api, listenRequest: widget.listenRequest),
+          ),
         ],
       );
     }
@@ -323,6 +420,13 @@ class _VideoTabState extends State<VideoTab> {
     final rec = w?['recording'] == true;
     final opts = (l.status['video_opts'] as Map?)?.cast<String, dynamic>() ?? {};
     final auto = w?['autoscan'] as Map<String, dynamic>?;
+    if (auto != null && !_modeSynced) {
+      _modeSynced = true;
+      _scanMode = auto['mode'] as String? ?? _scanMode;
+      _circular = auto['circular'] as bool? ?? _circular;
+      _dwell = ((auto['dwell_s'] as num?)?.toDouble() ?? _dwell).clamp(1, 15);
+      _scanAudio = auto['audio'] as bool? ?? _scanAudio;
+    }
     final hasPicture = _src == 'baseband' ? _img.value != null : _jpeg.value != null;
 
     return ListView(
@@ -467,7 +571,7 @@ class _VideoTabState extends State<VideoTab> {
           ),
         ),
 
-        // ---- круговий автоскан ----
+        // ---- круговий автоскан: 3 режими ----
         Card(
           margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
           child: Padding(
@@ -480,7 +584,7 @@ class _VideoTabState extends State<VideoTab> {
                     const Icon(Icons.autorenew, size: 18),
                     const SizedBox(width: 6),
                     const Expanded(
-                      child: Text('Круговий автоскан відео', style: TextStyle(fontWeight: FontWeight.bold)),
+                      child: Text('Круговий автоскан', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
                     FilledButton.icon(
                       icon: Icon(auto != null ? Icons.stop : Icons.play_arrow),
@@ -489,23 +593,87 @@ class _VideoTabState extends State<VideoTab> {
                     ),
                   ],
                 ),
-                Text(
-                  _circular
-                      ? 'Іде по колу всіх вибраних каналів; знайшов картинку — показує ${_dwell.round()} с і йде далі. '
-                            'Знайдене збирається нижче — тап, щоб зупинитися на ньому.'
-                      : 'Іде по каналах і ЗУПИНЯЄТЬСЯ на першій картинці; зникла — шукає далі.',
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-                Wrap(
-                  spacing: 6,
-                  children: [
-                    for (final b in const ['R', 'F', 'A', 'B', 'E', 'L', 'U', 'O', 'H', '1G2', '1G3', '3G3'])
-                      FilterChip(
-                        label: Text(b),
-                        selected: _scanBands.contains(b),
-                        onSelected: (v) => setState(() => v ? _scanBands.add(b) : _scanBands.remove(b)),
-                      ),
+                const SizedBox(height: 6),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'grids', label: Text('Сітки')),
+                    ButtonSegment(value: 'full', label: Text('Весь діапазон')),
+                    ButtonSegment(value: 'range', label: Text('Від–до')),
                   ],
+                  selected: {_scanMode},
+                  onSelectionChanged: (v) {
+                    setState(() {
+                      _scanMode = v.first;
+                      _modeSynced = true;
+                    });
+                    if (auto != null) _autoscan(true);
+                  },
+                ),
+                const SizedBox(height: 6),
+                Text(switch (_scanMode) {
+                  'grids' => 'Канали вибраних сіток по черзі, ~0.3 с на порожній канал.',
+                  'full' =>
+                    'Увесь діапазон SDR по порядку вікнами ~16 МГц: швидкий спектр, перевірка відео лише там, де '
+                        'є широкий сигнал. Коло — кілька секунд.',
+                  _ => 'Лише вказаний діапазон, по порядку, коло за колом.',
+                }, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                if (_scanMode == 'grids')
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      for (final b in const ['R', 'F', 'A', 'B', 'E', 'L', 'U', 'O', 'H', '1G2', '1G3', '3G3'])
+                        FilterChip(
+                          label: Text(b),
+                          selected: _scanBands.contains(b),
+                          onSelected: (v) => setState(() => v ? _scanBands.add(b) : _scanBands.remove(b)),
+                        ),
+                    ],
+                  ),
+                if (_scanMode == 'range')
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _fromCtl,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(
+                              labelText: 'Від, МГц',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: _toCtl,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(
+                              labelText: 'До, МГц',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (auto != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: _ScanProgress(auto: auto),
+                  ),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Шукати й голос (рації < 1.3 ГГц)'),
+                  value: _scanAudio,
+                  onChanged: (v) {
+                    setState(() => _scanAudio = v);
+                    if (auto != null) _autoscan(true);
+                  },
                 ),
                 SwitchListTile(
                   dense: true,
@@ -542,27 +710,26 @@ class _VideoTabState extends State<VideoTab> {
                   value: _autoStart,
                   onChanged: (v) => setState(() => _autoStart = v),
                 ),
-                if (auto != null && (auto['found'] as List).isNotEmpty) ...[
-                  const Text('Знайдено відео:', style: TextStyle(color: Colors.white60, fontSize: 12)),
-                  Wrap(
-                    spacing: 6,
-                    children: [
-                      for (final f in (auto['found'] as List).cast<Map<String, dynamic>>())
-                        ActionChip(
-                          avatar: const Icon(Icons.videocam, size: 16, color: Colors.redAccent),
-                          label: Text('${f['channel']} · ${f['freq_mhz']}'),
-                          onPressed: () async {
-                            await _autoscan(false);
-                            _tune((f['freq_mhz'] as num).toDouble(), immediate: true);
-                          },
-                        ),
-                    ],
-                  ),
-                ],
               ],
             ),
           ),
         ),
+
+        // ---- знайдене: відео (з мініатюрами) і голос ----
+        if (auto != null && (auto['found'] as List).isNotEmpty)
+          _FoundList(
+            found: (auto['found'] as List).cast<Map<String, dynamic>>(),
+            thumbFor: _thumbFor,
+            onVideo: (hz) => _goVideo(hz),
+            onListen: (hz) {
+              widget.listenRequest?.value = hz;
+              _onListenRequest();
+            },
+            onEfir: widget.onShowInEfir,
+          ),
+
+        // ---- приймач: підсилення ----
+        _GainCard(api: widget.api),
 
         // ---- швидкий перехід на знайдене сканером відео ----
         _VideoSignals(onTune: (hz) => _tune(hz / 1e6, immediate: true)),
@@ -822,6 +989,352 @@ class _VideoSignals extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Де зараз автоскан: позиція в діапазоні, коло, час кола.
+class _ScanProgress extends StatelessWidget {
+  const _ScanProgress({required this.auto});
+
+  final Map<String, dynamic> auto;
+
+  @override
+  Widget build(BuildContext context) {
+    final total = (auto['total'] as num?)?.toInt() ?? 1;
+    final idx = (auto['index'] as num?)?.toInt() ?? 0;
+    final pos = (auto['pos_hz'] as num?)?.toDouble();
+    final roundS = (auto['round_s'] as num?)?.toDouble();
+    final dwelling = auto['dwelling'] == true;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        LinearProgressIndicator(value: total > 0 ? (idx + 1) / total : null, minHeight: 4),
+        const SizedBox(height: 4),
+        Text(
+          '${dwelling ? 'Показую знайдене' : 'Пошук'}'
+          '${pos != null ? ' · ${(pos / 1e6).toStringAsFixed(0)} МГц' : ''}'
+          ' · коло ${(auto['rounds'] as num? ?? 0).toInt() + 1}'
+          '${roundS != null ? ' · коло за ${roundS.toStringAsFixed(1)} с' : ''}',
+          style: const TextStyle(color: Colors.white60, fontSize: 12),
+        ),
+      ],
+    );
+  }
+}
+
+/// Список знайденого: відео з мініатюрою (тап — дивитися), голос (тап — слухати), «Ефір» — на спектрі.
+class _FoundList extends StatelessWidget {
+  const _FoundList({
+    required this.found,
+    required this.thumbFor,
+    required this.onVideo,
+    required this.onListen,
+    this.onEfir,
+  });
+
+  final List<Map<String, dynamic>> found;
+  final ui.Image? Function(double mhz) thumbFor;
+  final void Function(double hz) onVideo;
+  final void Function(double hz) onListen;
+  final void Function(double hz)? onEfir;
+
+  @override
+  Widget build(BuildContext context) {
+    final videos = found.where((e) => e['type'] == 'video').toList();
+    final voices = found.where((e) => e['type'] == 'audio').toList()
+      ..sort((a, b) => ((b['last_seen'] as num?) ?? 0).compareTo((a['last_seen'] as num?) ?? 0));
+    String ago(Map<String, dynamic> e) {
+      final t = (e['last_seen'] as num?)?.toDouble();
+      if (t == null) return '';
+      final s = DateTime.now().millisecondsSinceEpoch / 1000 - t;
+      return s < 60 ? '${s.round()} с тому' : '${(s / 60).round()} хв тому';
+    }
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (videos.isNotEmpty) ...[
+              Text(
+                'Знайдене відео (${videos.length}) — натисніть, щоб дивитися',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 6),
+              SizedBox(
+                height: 128,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    for (final e in videos)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: InkWell(
+                          onTap: () => onVideo((e['freq_mhz'] as num).toDouble() * 1e6),
+                          child: SizedBox(
+                            width: 120,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(6),
+                                  child: Container(
+                                    width: 120,
+                                    height: 80,
+                                    color: Colors.black,
+                                    child: thumbFor((e['freq_mhz'] as num).toDouble()) != null
+                                        ? RawImage(image: thumbFor((e['freq_mhz'] as num).toDouble()), fit: BoxFit.fill)
+                                        : const Center(child: Icon(Icons.videocam, color: Colors.redAccent)),
+                                  ),
+                                ),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        '${e['channel'] ?? ''} ${e['freq_mhz']}',
+                                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    if (onEfir != null)
+                                      InkWell(
+                                        onTap: () => onEfir!((e['freq_mhz'] as num).toDouble() * 1e6),
+                                        child: const Padding(
+                                          padding: EdgeInsets.all(2),
+                                          child: Icon(Icons.ssid_chart, size: 18, color: Colors.white60),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                Text(ago(e), style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+            if (voices.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Голос / вузькі сигнали (${voices.length}) — натисніть, щоб слухати',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              for (final e in voices.take(12))
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.record_voice_over, color: Colors.lightBlueAccent),
+                  title: Text('${(e['freq_mhz'] as num).toStringAsFixed(4)} МГц'),
+                  subtitle: Text('+${e['level_db']} дБ над шумом · ${ago(e)} · бачено ${e['hits']}×'),
+                  onTap: () => onListen((e['freq_mhz'] as num).toDouble() * 1e6),
+                  trailing: onEfir == null
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.ssid_chart),
+                          tooltip: 'Показати в «Ефірі»',
+                          onPressed: () => onEfir!((e['freq_mhz'] as num).toDouble() * 1e6),
+                        ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Підсилення приймача — тут, поруч з відео (найчастіше саме під картинку його й крутять).
+class _GainCard extends StatelessWidget {
+  const _GainCard({required this.api});
+
+  final ApiClient api;
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.watch<LiveConnection>();
+    final g = (l.status['gain'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final auto = g['auto'] == true;
+    Future<void> set(Map<String, dynamic> v) async {
+      try {
+        final st = await api.post('/api/control/gain', v);
+        if (st is Map<String, dynamic>) l.updateStatus(st);
+      } catch (e) {
+        if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    }
+
+    Widget slider(String name, String key, double max, double step) {
+      final v = ((g[key] as num?)?.toDouble() ?? 0).clamp(0.0, max);
+      return Row(
+        children: [
+          SizedBox(width: 92, child: Text('$name ${v.round()} дБ', style: const TextStyle(fontSize: 13))),
+          Expanded(
+            child: Slider(
+              value: v,
+              min: 0,
+              max: max,
+              divisions: (max / step).round(),
+              onChanged: auto ? null : (x) => set({key: x}),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Приймач', style: TextStyle(fontWeight: FontWeight.bold)),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Автоматичне підсилення'),
+              subtitle: const Text('Знижує підсилення при перевантаженні сильним сигналом'),
+              value: auto,
+              onChanged: (v) => set({'auto': v}),
+            ),
+            slider('LNA', 'lna', 40, 8),
+            slider('VGA', 'vga', 62, 2),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('AMP +14 дБ (далекі слабкі сигнали)'),
+              value: g['amp'] == true,
+              onChanged: (v) => set({'amp': v}),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Повноекранне відео: власна сторінка з керуванням; орієнтація й системні панелі
+/// відновлюються при БУДЬ-ЯКОМУ виході (кнопка «Назад», жест, кнопка закриття).
+class _FullscreenVideo extends StatefulWidget {
+  const _FullscreenVideo({required this.screen, required this.freq, required this.onStep, required this.stats});
+
+  final Widget Function() screen;
+  final double Function() freq;
+  final void Function(double d) onStep;
+  final VideoStats? Function() stats;
+
+  @override
+  State<_FullscreenVideo> createState() => _FullscreenVideoState();
+}
+
+class _FullscreenVideoState extends State<_FullscreenVideo> {
+  bool _controls = true;
+  Timer? _hide;
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+      DeviceOrientation.portraitUp,
+    ]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _scheduleHide();
+    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted && _controls) setState(() {});
+    });
+  }
+
+  void _scheduleHide() {
+    _hide?.cancel();
+    _hide = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _controls = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _hide?.cancel();
+    _tick?.cancel();
+    SystemChrome.setPreferredOrientations([]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final st = widget.stats();
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          setState(() => _controls = !_controls);
+          if (_controls) _scheduleHide();
+        },
+        onDoubleTap: () => Navigator.of(context).maybePop(),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Center(
+              child: AspectRatio(aspectRatio: 4 / 3, child: widget.screen()),
+            ),
+            if (_controls) ...[
+              Positioned(
+                left: 12,
+                top: 12,
+                child: _Osd(
+                  lines: [
+                    '${widget.freq().toStringAsFixed(1)} МГц',
+                    st?.locked == true
+                        ? '${st!.standard} · синхро ${(st.syncScore * 100).round()}%'
+                        : 'немає відео — сніг',
+                  ],
+                  good: st?.locked == true,
+                ),
+              ),
+              Positioned(
+                right: 8,
+                top: 8,
+                child: IconButton.filledTonal(
+                  icon: const Icon(Icons.fullscreen_exit),
+                  tooltip: 'Вийти з повного екрана',
+                  onPressed: () => Navigator.of(context).maybePop(),
+                ),
+              ),
+              Positioned(
+                bottom: 12,
+                left: 0,
+                right: 0,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    for (final d in const [-5.0, -1.0, 1.0, 5.0])
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: FilledButton.tonal(
+                          onPressed: () {
+                            widget.onStep(d);
+                            _scheduleHide();
+                          },
+                          child: Text(d > 0 ? '+${d.round()}' : '${d.round()}'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }

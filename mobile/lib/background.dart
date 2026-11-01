@@ -10,6 +10,7 @@ import 'announcements.dart';
 import 'api.dart';
 import 'device_store.dart';
 import 'notifications.dart';
+import 'notify_settings.dart';
 
 /// Фоновий моніторинг: опитує всі модулі й показує сповіщення про нові сигнали,
 /// навіть коли застосунок згорнуто (Android — foreground service, iOS — background fetch).
@@ -106,25 +107,46 @@ Future<String> pollOnce() async {
         await p.setInt(key, latest.isEmpty ? 0 : latest.first.id);
       } else {
         final evs = await api.events(sinceId: last, limit: 50);
+        final ns = await NotifySettings.load();
         var maxId = last;
         for (final e in evs) {
           if (e.id > maxId) maxId = e.id;
           if (!d.notify || e.priority < d.minPriority) continue;
           if (!const {'new', 'reacquired', 'changed'}.contains(e.kind)) continue;
           final s = e.signal;
+          if (!ns.allows(e.classCode, s.rssi, e.freqHz)) continue;
           final title = '${d.name}: ${e.label}${e.kind == 'reacquired' ? ' (знову)' : ''}';
+          final quiet = ns.isQuietNow;
           await Notifications.alert(
             (d.id.hashCode ^ e.id) & 0x7fffffff,
             title,
             s.hint,
             high: e.priority >= 2,
             payload: '${d.id}|${e.id}',
+            sound: ns.sound && !quiet,
+            vibrate: ns.vibrate && !quiet,
           );
         }
         await p.setInt(key, maxId);
       }
       final st = await api.status();
       active += (st['active_signals'] as int?) ?? 0;
+      // Стан модуля: перегрів, просідання живлення, мало місця — раз на годину про кожне
+      try {
+        final ns = await NotifySettings.load();
+        if (ns.moduleHealth && d.notify) {
+          final h = await api.get('/api/health');
+          final warns = (((h as Map)['current'] as Map?)?['warnings'] as List?)?.cast<String>() ?? const [];
+          for (final w in warns) {
+            final k = 'health_${d.id}_$w';
+            final lastT = p.getInt(k) ?? 0;
+            if (DateTime.now().millisecondsSinceEpoch - lastT > 3600 * 1000) {
+              await p.setInt(k, DateTime.now().millisecondsSinceEpoch);
+              await Notifications.alert((d.id.hashCode ^ w.hashCode) & 0x7fffffff, '${d.name}: стан модуля', w);
+            }
+          }
+        }
+      } catch (_) {}
     } catch (_) {
       final n = (_failures[d.id] ?? 0) + 1;
       _failures[d.id] = n;

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -108,27 +109,65 @@ class Signal {
 }
 
 class SpectrumFrame {
-  SpectrumFrame(this.range, this.name, this.fStart, this.fStop, this.bins, this.floor, this.thresholdDb, this.ts);
+  SpectrumFrame(
+    this.range,
+    this.name,
+    this.fStart,
+    this.fStop,
+    this.bins,
+    this.floor,
+    this.thresholdDb,
+    this.ts, {
+    this.zoom = false,
+  });
 
   final int range;
   final String name;
   final double fStart;
   final double fStop;
-  final List<double> bins;
-  final List<double> floor;
+  final Float32List bins;
+  final Float32List floor;
   final double thresholdDb;
   final double ts;
 
+  /// Збільшена ділянка, яку модуль надіслав з повною деталізацією.
+  final bool zoom;
+
   factory SpectrumFrame.fromJson(Map<String, dynamic> j) => SpectrumFrame(
     j['range'] as int,
-    j['name'] as String,
+    j['name'] as String? ?? '',
     (j['f_start'] as num).toDouble(),
     (j['f_stop'] as num).toDouble(),
-    (j['bins'] as List).map((e) => (e as num).toDouble()).toList(),
-    (j['floor'] as List).map((e) => (e as num).toDouble()).toList(),
+    Float32List.fromList((j['bins'] as List).map((e) => (e as num).toDouble()).toList()),
+    Float32List.fromList((j['floor'] as List).map((e) => (e as num).toDouble()).toList()),
     (j['threshold_db'] as num?)?.toDouble() ?? 8,
     (j['ts'] as num).toDouble(),
+    zoom: j['zoom'] == true,
   );
+
+  /// Бінарний кадр (див. pi/sdrwatch/api.py spectrum_bytes): 40-байтний заголовок + int16 дБ×10.
+  static SpectrumFrame? fromBytes(Uint8List b, String Function(int range) nameOf) {
+    if (b.length < 40 || b[0] != 0x53 || b[1] != 0x50 || b[2] != 0x45 || b[3] != 0x43) return null;
+    final d = ByteData.sublistView(b);
+    final flags = d.getUint8(5);
+    final range = d.getInt16(6, Endian.little);
+    final f0 = d.getFloat64(8, Endian.little);
+    final f1 = d.getFloat64(16, Endian.little);
+    final ts = d.getFloat64(24, Endian.little);
+    final thr = d.getFloat32(32, Endian.little);
+    final n = d.getUint32(36, Endian.little);
+    if (b.length < 40 + n * 4) return null;
+    final bins = Float32List(n), floor = Float32List(n);
+    for (var i = 0; i < n; i++) {
+      bins[i] = d.getInt16(40 + i * 2, Endian.little) / 10;
+      floor[i] = d.getInt16(40 + n * 2 + i * 2, Endian.little) / 10;
+    }
+    return SpectrumFrame(range, nameOf(range), f0, f1, bins, floor, thr, ts, zoom: flags & 1 != 0);
+  }
+
+  double freqAt(int i) => fStart + (fStop - fStart) * i / (bins.length - 1);
+
+  int indexOf(double hz) => ((hz - fStart) / (fStop - fStart) * (bins.length - 1)).round();
 }
 
 class EventItem {

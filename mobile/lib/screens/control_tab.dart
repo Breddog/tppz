@@ -6,6 +6,7 @@ import '../device_store.dart';
 import '../live.dart';
 import '../models.dart';
 import 'add_device_screen.dart';
+import 'module_sections.dart';
 import 'network_section.dart';
 import 'transmit_screen.dart';
 import 'update_section.dart';
@@ -98,7 +99,6 @@ class _ControlTabState extends State<ControlTab> {
               ),
       );
     }
-    final sdr = c['sdr'] as Map<String, dynamic>;
     final dsp = c['dsp'] as Map<String, dynamic>;
     final dist = c['distance'] as Map<String, dynamic>;
     final st = c['storage'] as Map<String, dynamic>;
@@ -117,6 +117,7 @@ class _ControlTabState extends State<ControlTab> {
       child: ListView(
         padding: const EdgeInsets.only(bottom: 40),
         children: [
+          HealthCard(live: l, api: widget.api),
           _h('Режим роботи'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -200,28 +201,10 @@ class _ControlTabState extends State<ControlTab> {
               help: 'Більше — швидше оглядається весь ефір, але рідше оновлюються FPV-діапазони',
             ),
 
-          _h('Приймач'),
-          SwitchListTile(
-            title: const Text('Автоматичне підсилення'),
-            subtitle: const Text('Знижує підсилення при перевантаженні сильним сигналом'),
-            value: sdr['auto_gain'] as bool,
-            onChanged: (v) => _gain({'auto': v}),
-          ),
-          _slider('LNA (ВЧ підсилення)', (sdr['lna_gain'] as num).toDouble(), 0, 40, 5, 'дБ', (v) => _gain({'lna': v})),
-          _slider(
-            'VGA (ПЧ підсилення)',
-            (sdr['vga_gain'] as num).toDouble(),
-            0,
-            62,
-            31,
-            'дБ',
-            (v) => _gain({'vga': v}),
-          ),
-          SwitchListTile(
-            title: const Text('Підсилювач AMP (+14 дБ)'),
-            subtitle: const Text('Для далеких слабких сигналів. Обережно поруч із потужними передавачами'),
-            value: sdr['amp'] as bool,
-            onChanged: (v) => _gain({'amp': v}),
+          const ListTile(
+            dense: true,
+            leading: Icon(Icons.tune),
+            title: Text('Підсилення приймача (LNA / VGA / AMP) — у вкладці «Відео», блок «Приймач»'),
           ),
 
           _h('Виявлення сигналів'),
@@ -302,6 +285,12 @@ class _ControlTabState extends State<ControlTab> {
             title: const Text('Калібрування відстані'),
             subtitle: Text('Поправка RSSI: ${(dist['rx_cal_db'] as num).toStringAsFixed(1)} дБ'),
             onTap: _calibrate,
+          ),
+
+          _h('Антена'),
+          AntennaSection(
+            antenna: (c['antenna'] as Map?)?.cast<String, dynamic>() ?? const {'name': 'Штатна (невідома)'},
+            onSave: (a) => _patch({'antenna': a}),
           ),
 
           _h('Кільцевий запис на флешці'),
@@ -459,11 +448,6 @@ class _ControlTabState extends State<ControlTab> {
   }
 
   double _nearest(double v, List<double> opts) => opts.reduce((a, b) => (a - v).abs() < (b - v).abs() ? a : b);
-
-  Future<void> _gain(Map<String, dynamic> g) => _call(() async {
-    await widget.api.gain(g);
-    await _load();
-  });
 
   Widget _h(String t) => Padding(
     padding: const EdgeInsets.fromLTRB(16, 22, 16, 6),

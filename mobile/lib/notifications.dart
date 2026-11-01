@@ -51,7 +51,19 @@ class Notifications {
     _ready = true;
   }
 
-  static Future<void> alert(int id, String title, String body, {bool high = true, String? payload}) {
+  /// Канали Android фіксують звук/вібрацію при створенні — тож окремий канал на кожне поєднання.
+  static String _channel(bool sound, bool vibrate) => '${alertsChannel}_${sound ? 's' : 'n'}${vibrate ? 'v' : 'n'}';
+
+  static Future<void> alert(
+    int id,
+    String title,
+    String body, {
+    bool high = true,
+    String? payload,
+    bool sound = true,
+    bool vibrate = true,
+  }) {
+    final ch = _channel(sound, vibrate);
     return plugin.show(
       id: id,
       title: title,
@@ -59,14 +71,16 @@ class Notifications {
       payload: payload,
       notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
-          alertsChannel,
-          'Знайдені сигнали',
+          ch,
+          'Знайдені сигнали${sound ? '' : ' (без звуку)'}${vibrate ? '' : ' (без вібрації)'}',
+          playSound: sound,
+          enableVibration: vibrate,
           importance: high ? Importance.high : Importance.defaultImportance,
           priority: high ? Priority.high : Priority.defaultPriority,
           styleInformation: BigTextStyleInformation(body),
           category: AndroidNotificationCategory.alarm,
         ),
-        iOS: const DarwinNotificationDetails(presentSound: true, interruptionLevel: InterruptionLevel.timeSensitive),
+        iOS: DarwinNotificationDetails(presentSound: sound, interruptionLevel: InterruptionLevel.timeSensitive),
       ),
     );
   }
