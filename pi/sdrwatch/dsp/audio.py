@@ -65,9 +65,16 @@ class AudioDemod:
         self.f3 = _OverlapFir(lowpass_taps(4e3 / AUDIO_RATE if mode != "wfm" else 0.45, 31), False)
         self.phase = 0.0
         self._rem = None
+        self._cic_hist = None
         self.prev = np.complex64(1)
         self.deemph = 0.0
         self.agc: float | None = None
+
+    @staticmethod
+    def _cic(d: int) -> np.ndarray:
+        k = np.ones(d, np.float32)
+        h = np.convolve(np.convolve(k, k), k)
+        return (h / h.sum()).astype(np.complex64)
 
     def channel(self, iq: np.ndarray, offset_hz: float) -> tuple[np.ndarray, float, float]:
         """Вирізати канал для демодуляції НА ТЕЛЕФОНІ — найдешевшим способом (як rtl_fm):
@@ -86,8 +93,19 @@ class AudioDemod:
         if getattr(self, "_lo_key", None) != key:
             self._lo_key = key
             self._lo = np.exp(1j * w * np.arange(m)).astype(np.complex64)
-        y = (x * self._lo * np.complex64(np.exp(1j * self.phase))).reshape(-1, d).mean(axis=1)
+        z = x * self._lo * np.complex64(np.exp(1j * self.phase))
         self.phase = float((self.phase + w * m) % (2 * np.pi))
+        # CIC 3-го порядку (три коробкові фільтри поспіль): сусідні станції в «дзеркалах»
+        # проріджування послаблюються на 40+ дБ (одиночний — лише ~15 дБ, і сильна сусідня
+        # FM-станція забивала канал шумом). Рахуємо лише потрібні виходи (поліфазно).
+        h = self._cic(d)
+        hist = getattr(self, "_cic_hist", None)
+        if hist is None or len(hist) != len(h) - 1:
+            hist = np.zeros(len(h) - 1, np.complex64)
+        buf = np.concatenate([hist, z])
+        self._cic_hist = buf[-(len(h) - 1):].copy()
+        win = np.lib.stride_tricks.sliding_window_view(buf, len(h))[::d]
+        y = (win @ h[::-1]).astype(np.complex64)
         p = float(np.mean(np.abs(y) ** 2)) + 1e-20 if len(y) else 1e-20
         return y.astype(np.complex64), SDR_RATE / d, float(10 * np.log10(p))
 

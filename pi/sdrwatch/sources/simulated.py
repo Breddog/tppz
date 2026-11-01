@@ -134,6 +134,10 @@ class Emitter:
             # Рація: ЧМ з тоном 1 кГц, девіація 3 кГц
             ph = (3000 / 1000) * np.sin(2 * np.pi * 1000 * t)   # індекс β = девіація / тон
             base, off = np.exp(1j * ph), self.freq_hz - center_hz
+        elif self.kind == "wfm":
+            # FM-мовлення: девіація 75 кГц, тон 1 кГц (індекс β = 75)
+            ph = (75e3 / 1000) * np.sin(2 * np.pi * 1000 * t)
+            base, off = np.exp(1j * ph), self.freq_hz - center_hz
         elif self.kind == "am":
             base, off = (1 + 0.6 * np.sin(2 * np.pi * 1000 * t)).astype(np.complex128), self.freq_hz - center_hz
         elif self.kind == "cw":

@@ -47,6 +47,24 @@ class _AudioPanelState extends State<AudioPanel> {
 
   final _freq = TextEditingController(text: '446.00625');
   String _mod = 'nfm';
+  bool _modManual = false; // користувач сам вибрав модуляцію — не перемикати автоматично
+
+  /// Модуляція за діапазоном (як у SDR++ / SDR Touch): FM-мовлення — широка ЧМ, авіація — АМ.
+  static String? bandMod(double hz) {
+    if (hz >= 87.5e6 && hz <= 108e6) return 'wfm';
+    if (hz >= 118e6 && hz <= 137e6) return 'am';
+    return null;
+  }
+
+  /// Підібрати модуляцію під частоту (повертає true, якщо змінилась).
+  bool _autoMod(double hz) {
+    if (_modManual) return false;
+    final m = bandMod(hz) ?? (_mod == 'nfm' ? null : 'nfm');
+    if (m == null || m == _mod) return false;
+    _mod = m;
+    return true;
+  }
+
   double _squelch = 10;
   WebSocketChannel? _ws;
   StreamSubscription? _sub;
@@ -179,6 +197,7 @@ class _AudioPanelState extends State<AudioPanel> {
   /// Колесо/шкала: змінити частоту; якщо звук увімкнено — перебудувати модуль (не частіше ніж раз на 80 мс).
   void _setFreq(double hz) {
     hz = hz.clamp(1e6, 6e9);
+    final modChanged = _autoMod(hz);
     setState(() {
       _fHz = hz;
       _freq.text = (hz / 1e6).toStringAsFixed(5);
@@ -188,7 +207,7 @@ class _AudioPanelState extends State<AudioPanel> {
     if (!active) return;
     _tuneT?.cancel();
     _tuneT = Timer(const Duration(milliseconds: 80), () {
-      widget.api.post('/api/audio/params', {'freq_hz': _fHz}).catchError((_) => null);
+      widget.api.post('/api/audio/params', {'freq_hz': _fHz, if (modChanged) 'mod': _mod}).catchError((_) => null);
     });
   }
 
@@ -220,6 +239,7 @@ class _AudioPanelState extends State<AudioPanel> {
     final mhz = double.tryParse(_freq.text.replaceAll(',', '.'));
     if (mhz == null) throw ApiException('Вкажіть частоту в МГц');
     _fHz = mhz * 1e6;
+    if (_autoMod(_fHz)) setState(() {});
     await widget.api.post('/api/audio/start', {'freq_hz': mhz * 1e6, 'mod': _mod, 'squelch_db': _squelch});
     _openWs();
     setState(() => _listening = true);
@@ -445,7 +465,11 @@ class _AudioPanelState extends State<AudioPanel> {
           segments: [for (final e in _mods.entries) ButtonSegment(value: e.key, label: Text(e.value))],
           selected: {_mod},
           onSelectionChanged: (s) {
-            setState(() => _mod = s.first);
+            setState(() {
+              _mod = s.first;
+              // вручну вибрали не те, що підказує діапазон, — більше не перемикати самим
+              _modManual = s.first != (bandMod(_fHz) ?? 'nfm');
+            });
             if (active) _params();
           },
         ),

@@ -415,3 +415,26 @@ def test_fast_sweep_mode(tmp_path):
         assert eng.sweeper is None and eng._opened
     finally:
         eng.stop()
+
+
+def test_wfm_broadcast_with_strong_neighbour():
+    """FM-мовлення: сильна сусідня станція (+400 кГц, на 20 дБ сильніша) не повинна забивати канал шумом."""
+    import numpy as np
+
+    from sdrwatch.dsp.audio import SDR_RATE, TUNE_OFFSET, AudioDemod
+    from sdrwatch.sources.simulated import Emitter, SimulatedSource
+    f = 101.5e6
+    s = SimulatedSource([Emitter(f, "wfm", power_dbm=-60, bandwidth_hz=200e3),
+                         Emitter(f + 400e3, "wfm", power_dbm=-40, bandwidth_hz=200e3, seed=3)], noise_dbfs=-70)
+    s.set_sample_rate(SDR_RATE)
+    s.set_gain(32, 30, False)
+    s.tune(f + TUNE_OFFSET)
+    d = AudioDemod("wfm")
+    x = np.concatenate([d.channel(s.read(120000), -TUNE_OFFSET)[0] for _ in range(5)][1:])
+    fm = np.angle(x[1:] * np.conj(x[:-1]))
+    fm = fm - fm.mean()
+    sp = np.abs(np.fft.rfft(fm * np.hanning(len(fm)))) ** 2
+    fr = np.fft.rfftfreq(len(fm), 1 / 240e3)
+    tone = sp[(fr > 900) & (fr < 1100)].sum()
+    audio = sp[(fr > 100) & (fr < 15e3)].sum()
+    assert tone / audio > 0.8, tone / audio
