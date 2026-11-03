@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api.dart';
 import '../device_store.dart';
@@ -11,16 +12,53 @@ import '../widgets/signal_widgets.dart';
 import 'add_device_screen.dart';
 import 'app_settings_screen.dart';
 import 'device_screen.dart';
+import 'direct_screen.dart';
 
-/// Головний екран: усі модулі, як камери спостереження.
-class HomeScreen extends StatelessWidget {
+/// Головний екран: усі модулі, як камери спостереження, або HackRF напряму (без Raspberry Pi).
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  String _mode = 'pi'; // pi — модулі Raspberry Pi | direct — HackRF через USB OTG
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((p) {
+      final m = p.getString('home.mode');
+      if (m != null && mounted) setState(() => _mode = m);
+    });
+  }
+
+  Future<void> _setMode(String m) async {
+    setState(() => _mode = m);
+    (await SharedPreferences.getInstance()).setString('home.mode', m);
+  }
 
   @override
   Widget build(BuildContext context) {
     final store = context.watch<DeviceStore>();
+    final direct = _mode == 'direct';
     return Scaffold(
       appBar: AppBar(
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(52),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+            child: SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'pi', icon: Icon(Icons.developer_board), label: Text('Модуль Pi')),
+                ButtonSegment(value: 'direct', icon: Icon(Icons.usb), label: Text('HackRF напряму')),
+              ],
+              selected: {_mode},
+              onSelectionChanged: (v) => _setMode(v.first),
+            ),
+          ),
+        ),
         title: const Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -36,12 +74,16 @@ class HomeScreen extends StatelessWidget {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        icon: const Icon(Icons.add),
-        label: const Text('Додати модуль'),
-        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AddDeviceScreen())),
-      ),
-      body: store.devices.isEmpty
+      floatingActionButton: direct
+          ? null
+          : FloatingActionButton.extended(
+              icon: const Icon(Icons.add),
+              label: const Text('Додати модуль'),
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AddDeviceScreen())),
+            ),
+      body: direct
+          ? const DirectScreen()
+          : store.devices.isEmpty
           ? const _Empty()
           : LayoutBuilder(
               builder: (context, c) {

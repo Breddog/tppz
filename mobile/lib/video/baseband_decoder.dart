@@ -30,6 +30,7 @@ class BasebandPacket {
   bool get piSeesVideo => flags & 1 != 0;
   bool get piInverted => flags & 2 != 0;
   bool get hasChroma => chromaRe != null;
+  bool get polarityUnknown => flags & 8 != 0;
 
   static const headerSize = 32;
 
@@ -140,11 +141,19 @@ class BasebandDecoder {
       _acc = null; // інша частота — накопичене вже не про те
       _lastFreq = p.freqHz;
     }
-    final inv = switch (polarity) {
+    var inv = switch (polarity) {
       Polarity.auto => p.piInverted,
       Polarity.normal => false,
       Polarity.inverted => true,
     };
+    if (polarity == Polarity.auto && p.polarityUnknown) {
+      // HackRF напряму: підказки модуля немає — пробуємо обидві полярності, краща синхронізація перемагає
+      final flipped = Float32List(p.samples.length);
+      for (var i = 0; i < flipped.length; i++) {
+        flipped[i] = 1 - p.samples[i];
+      }
+      inv = _findSync(flipped, fs).score > _findSync(p.samples, fs).score + 0.05;
+    }
     stats.inverted = inv;
     final v = p.samples;
     if (inv) {

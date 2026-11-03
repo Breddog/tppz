@@ -75,4 +75,23 @@ void main() {
     final f = BasebandDecoder().decode(load('bb_pal'));
     expect(f.rgba[(150 * f.width + 50) * 4], f.rgba[(150 * f.width + 50) * 4 + 2]);
   });
+
+  test('HackRF напряму (DirectDsp, Java): колір і полярність без підказки модуля', () {
+    final p = load('bb_direct_color');
+    expect(p.polarityUnknown, isTrue);
+    expect(p.hasChroma, isTrue);
+    final f = BasebandDecoder().decode(p);
+    expect(f.stats.locked, isTrue);
+    expect(f.stats.inverted, isFalse);
+    expect(f.stats.colorQuality, greaterThan(0.5));
+    final x = ((5 + 0.5) * f.width / 8).floor(); // червона смуга
+    final j = (150 * f.width + x) * 4;
+    expect(f.rgba[j], greaterThan(f.rgba[j + 1] + 60));
+  });
+
+  test('HackRF напряму: інверсне відео визначається телефоном', () {
+    final f = BasebandDecoder().decode(load('bb_direct_inv'));
+    expect(f.stats.locked, isTrue);
+    expect(f.stats.inverted, isTrue);
+  });
 }

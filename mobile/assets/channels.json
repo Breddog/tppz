@@ -1,0 +1,824 @@
+{
+ "version": 1,
+ "updated": "2026-11-01",
+ "note": "База частотних сіток SDR Watch. Оновлюється з застосунку без перепрошивки.",
+ "bands": [
+  {
+   "code": "A",
+   "title": "Boscam A",
+   "kind": "analog",
+   "freqs_mhz": [
+    5865,
+    5845,
+    5825,
+    5805,
+    5785,
+    5765,
+    5745,
+    5725
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Boscam",
+    "Eachine",
+    "Foxeer",
+    "TBS",
+    "RunCam",
+    "Rush",
+    "AKK",
+    "Caddx"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "B",
+   "title": "Boscam B",
+   "kind": "analog",
+   "freqs_mhz": [
+    5733,
+    5752,
+    5771,
+    5790,
+    5809,
+    5828,
+    5847,
+    5866
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Boscam",
+    "Eachine",
+    "Foxeer",
+    "TBS",
+    "RunCam",
+    "Rush",
+    "AKK"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "E",
+   "title": "Boscam E / FlySky / DJI analog",
+   "kind": "analog",
+   "freqs_mhz": [
+    5705,
+    5685,
+    5665,
+    5645,
+    5885,
+    5905,
+    5925,
+    5945
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Boscam",
+    "FlySky",
+    "Eachine",
+    "Foxeer",
+    "TBS"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "F",
+   "title": "Fatshark / ImmersionRC",
+   "kind": "analog",
+   "freqs_mhz": [
+    5740,
+    5760,
+    5780,
+    5800,
+    5820,
+    5840,
+    5860,
+    5880
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Fat Shark",
+    "ImmersionRC",
+    "TBS",
+    "Foxeer",
+    "RunCam"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "R",
+   "title": "Raceband",
+   "kind": "analog",
+   "freqs_mhz": [
+    5658,
+    5695,
+    5732,
+    5769,
+    5806,
+    5843,
+    5880,
+    5917
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "ImmersionRC",
+    "TBS Unify",
+    "Foxeer",
+    "RunCam",
+    "Rush",
+    "HDZero (аналог. сумісн.)"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "L",
+   "title": "Lowrace (Band L / D)",
+   "kind": "analog",
+   "freqs_mhz": [
+    5362,
+    5399,
+    5436,
+    5473,
+    5510,
+    5547,
+    5584,
+    5621
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Eachine",
+    "Foxeer",
+    "Rush",
+    "AKK",
+    "TBS (розшир.)"
+   ],
+   "note": "Нижня частина 5.8: 5.3–5.6 ГГц",
+   "popular": false,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "U",
+   "title": "Band U",
+   "kind": "analog",
+   "freqs_mhz": [
+    5325,
+    5348,
+    5366,
+    5384,
+    5402,
+    5420,
+    5438,
+    5456
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Rush",
+    "Foxeer",
+    "розширені VTX"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "O",
+   "title": "Band O",
+   "kind": "analog",
+   "freqs_mhz": [
+    5474,
+    5492,
+    5510,
+    5528,
+    5546,
+    5564,
+    5582,
+    5600
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Rush",
+    "Foxeer",
+    "розширені VTX"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "H",
+   "title": "Band H",
+   "kind": "analog",
+   "freqs_mhz": [
+    5653,
+    5693,
+    5733,
+    5773,
+    5813,
+    5853,
+    5893,
+    5933
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Rush",
+    "Foxeer",
+    "розширені VTX"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "X",
+   "title": "Band X (4.9 ГГц)",
+   "kind": "analog",
+   "freqs_mhz": [
+    4990,
+    5020,
+    5050,
+    5080,
+    5110,
+    5140,
+    5170,
+    5200
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Rush Tank (розшир.)",
+    "Foxeer (розшир.)"
+   ],
+   "note": "Розширений діапазон окремих VTX — орієнтовно, залежить від прошивки",
+   "popular": false,
+   "group": "5.8 ГГц аналогове FPV"
+  },
+  {
+   "code": "1G2",
+   "title": "1.2 ГГц 9 каналів",
+   "kind": "analog",
+   "freqs_mhz": [
+    1080,
+    1120,
+    1160,
+    1200,
+    1240,
+    1258,
+    1280,
+    1320,
+    1360
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Lawmate",
+    "Foxtech",
+    "Eachine",
+    "AKK",
+    "RMRC"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "1.2–1.3 ГГц аналогове"
+  },
+  {
+   "code": "1G3",
+   "title": "1.3 ГГц (Band A/B)",
+   "kind": "analog",
+   "freqs_mhz": [
+    1010,
+    1040,
+    1080,
+    1120,
+    1160,
+    1200,
+    1240,
+    1280,
+    1320,
+    1360
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "ImmersionRC 1.3",
+    "Foxtech",
+    "Lawmate"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "1.2–1.3 ГГц аналогове"
+  },
+  {
+   "code": "1G2E",
+   "title": "1.2 ГГц розширена 16 кан.",
+   "kind": "analog",
+   "freqs_mhz": [
+    1010,
+    1030,
+    1050,
+    1070,
+    1090,
+    1110,
+    1130,
+    1150,
+    1170,
+    1190,
+    1210,
+    1230,
+    1250,
+    1270,
+    1290,
+    1310
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "китайські VTX 1.2/1.3"
+   ],
+   "note": "Орієнтовно: крок 20 МГц, залежить від моделі",
+   "popular": false,
+   "group": "1.2–1.3 ГГц аналогове"
+  },
+  {
+   "code": "0G9",
+   "title": "900 МГц (старі комплекти)",
+   "kind": "analog",
+   "freqs_mhz": [
+    910,
+    980,
+    1010,
+    1040,
+    1080
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Lawmate 900",
+    "старі комплекти"
+   ],
+   "note": "Орієнтовно",
+   "popular": false,
+   "group": "900 МГц аналогове"
+  },
+  {
+   "code": "2G4",
+   "title": "2.4 ГГц 4 канали",
+   "kind": "analog",
+   "freqs_mhz": [
+    2414,
+    2432,
+    2450,
+    2468
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "Lawmate",
+    "Boscam 2.4",
+    "китайські 2.4 VTX"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "2.4 ГГц аналогове"
+  },
+  {
+   "code": "2G4E",
+   "title": "2.4 ГГц 8 каналів",
+   "kind": "analog",
+   "freqs_mhz": [
+    2370,
+    2390,
+    2410,
+    2430,
+    2450,
+    2470,
+    2490,
+    2510
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "китайські 2.4 VTX"
+   ],
+   "note": "Орієнтовно",
+   "popular": false,
+   "group": "2.4 ГГц аналогове"
+  },
+  {
+   "code": "3G3",
+   "title": "3.3 ГГц 8 каналів",
+   "kind": "analog",
+   "freqs_mhz": [
+    3330,
+    3350,
+    3370,
+    3390,
+    3410,
+    3430,
+    3450,
+    3470
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "китайські VTX 3.3"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "3.3 ГГц аналогове"
+  },
+  {
+   "code": "3G3E",
+   "title": "3.3 ГГц 16 каналів",
+   "kind": "analog",
+   "freqs_mhz": [
+    3170,
+    3190,
+    3210,
+    3230,
+    3250,
+    3270,
+    3290,
+    3310,
+    3330,
+    3350,
+    3370,
+    3390,
+    3410,
+    3430,
+    3450,
+    3470
+   ],
+   "bandwidth_mhz": 18,
+   "makers": [
+    "китайські VTX 3.3 (розшир.)"
+   ],
+   "note": "Орієнтовно",
+   "popular": false,
+   "group": "3.3 ГГц аналогове"
+  },
+  {
+   "code": "DJI",
+   "title": "DJI FPV / Vista / Air Unit (FCC 8 кан.)",
+   "kind": "digital",
+   "freqs_mhz": [
+    5660,
+    5695,
+    5735,
+    5770,
+    5805,
+    5839,
+    5878,
+    5914
+   ],
+   "bandwidth_mhz": 20,
+   "makers": [
+    "DJI",
+    "Caddx Vista"
+   ],
+   "note": "",
+   "popular": true,
+   "group": "Цифрове FPV-відео"
+  },
+  {
+   "code": "DJICE",
+   "title": "DJI FPV (CE 4 кан.)",
+   "kind": "digital",
+   "freqs_mhz": [
+    5735,
+    5770,
+    5805,
+    5839
+   ],
+   "bandwidth_mhz": 20,
+   "makers": [
+    "DJI"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "Цифрове FPV-відео"
+  },
+  {
+   "code": "DJI40",
+   "title": "DJI O3 / O4 40 МГц",
+   "kind": "digital",
+   "freqs_mhz": [
+    5795
+   ],
+   "bandwidth_mhz": 40,
+   "makers": [
+    "DJI O3",
+    "DJI O4"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "Цифрове FPV-відео"
+  },
+  {
+   "code": "WS",
+   "title": "Walksnail Avatar",
+   "kind": "digital",
+   "freqs_mhz": [
+    5660,
+    5695,
+    5735,
+    5770,
+    5805,
+    5878,
+    5914,
+    5839
+   ],
+   "bandwidth_mhz": 20,
+   "makers": [
+    "Walksnail",
+    "Caddx"
+   ],
+   "note": "Орієнтовно, як DJI FCC",
+   "popular": false,
+   "group": "Цифрове FPV-відео"
+  },
+  {
+   "code": "HDZ",
+   "title": "HDZero",
+   "kind": "digital",
+   "freqs_mhz": [
+    5658,
+    5695,
+    5732,
+    5769,
+    5806,
+    5843,
+    5880,
+    5917,
+    5760,
+    5800
+   ],
+   "bandwidth_mhz": 20,
+   "makers": [
+    "HDZero (Divimath)"
+   ],
+   "note": "R1–R8 + F2, F4",
+   "popular": false,
+   "group": "Цифрове FPV-відео"
+  },
+  {
+   "code": "OIPC",
+   "title": "OpenIPC / wfb-ng (Wi-Fi 5 ГГц)",
+   "kind": "digital",
+   "freqs_mhz": [
+    5180,
+    5200,
+    5220,
+    5240,
+    5745,
+    5765,
+    5785,
+    5805,
+    5825
+   ],
+   "bandwidth_mhz": 20,
+   "makers": [
+    "OpenIPC",
+    "wfb-ng"
+   ],
+   "note": "Канали Wi-Fi 36–48, 149–165",
+   "popular": false,
+   "group": "Цифрове FPV-відео"
+  },
+  {
+   "code": "WIFI",
+   "title": "Wi-Fi 2.4 ГГц",
+   "kind": "wifi",
+   "freqs_mhz": [
+    2412,
+    2417,
+    2422,
+    2427,
+    2432,
+    2437,
+    2442,
+    2447,
+    2452,
+    2457,
+    2462,
+    2467,
+    2472
+   ],
+   "bandwidth_mhz": 20,
+   "makers": [
+    "IEEE 802.11"
+   ],
+   "note": "",
+   "popular": false,
+   "group": "Wi-Fi (часто — хибні тривоги)"
+  }
+ ],
+ "links": [
+  {
+   "name": "ExpressLRS 2.4 ГГц",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "ExpressLRS",
+    "RadioMaster",
+    "BetaFPV",
+    "HappyModel"
+   ]
+  },
+  {
+   "name": "ExpressLRS 868 МГц (EU)",
+   "kind": "control",
+   "start_mhz": 863,
+   "stop_mhz": 870,
+   "makers": [
+    "ExpressLRS"
+   ]
+  },
+  {
+   "name": "ExpressLRS 915 МГц",
+   "kind": "control",
+   "start_mhz": 902,
+   "stop_mhz": 928,
+   "makers": [
+    "ExpressLRS"
+   ]
+  },
+  {
+   "name": "TBS Crossfire 868 / 915",
+   "kind": "control",
+   "start_mhz": 860,
+   "stop_mhz": 930,
+   "makers": [
+    "Team BlackSheep"
+   ]
+  },
+  {
+   "name": "TBS Tracer 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "Team BlackSheep"
+   ]
+  },
+  {
+   "name": "ImmersionRC Ghost 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "ImmersionRC"
+   ]
+  },
+  {
+   "name": "FrSky ACCST/ACCESS 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "FrSky"
+   ]
+  },
+  {
+   "name": "FrSky R9 868 / 915",
+   "kind": "control",
+   "start_mhz": 860,
+   "stop_mhz": 930,
+   "makers": [
+    "FrSky"
+   ]
+  },
+  {
+   "name": "FlySky AFHDS 2A/3 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "FlySky"
+   ]
+  },
+  {
+   "name": "Spektrum DSMX 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "Spektrum"
+   ]
+  },
+  {
+   "name": "Futaba FASST/FHSS 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2480,
+   "makers": [
+    "Futaba"
+   ]
+  },
+  {
+   "name": "LRS 433 МГц (OpenLRS, Dragon Link)",
+   "kind": "control",
+   "start_mhz": 430,
+   "stop_mhz": 440,
+   "makers": [
+    "OpenLRS",
+    "Dragon Link"
+   ]
+  },
+  {
+   "name": "Телеметрія SiK / MAVLink 433",
+   "kind": "telemetry",
+   "start_mhz": 433,
+   "stop_mhz": 435,
+   "makers": [
+    "3DR",
+    "Holybro",
+    "RFD"
+   ]
+  },
+  {
+   "name": "Телеметрія SiK / RFD 868/915",
+   "kind": "telemetry",
+   "start_mhz": 868,
+   "stop_mhz": 928,
+   "makers": [
+    "RFD900",
+    "Holybro",
+    "3DR"
+   ]
+  },
+  {
+   "name": "DJI OcuSync / O3 / O4 2.4",
+   "kind": "control",
+   "start_mhz": 2400,
+   "stop_mhz": 2484,
+   "makers": [
+    "DJI"
+   ]
+  },
+  {
+   "name": "DJI OcuSync / O3 / O4 5.8",
+   "kind": "control",
+   "start_mhz": 5725,
+   "stop_mhz": 5850,
+   "makers": [
+    "DJI"
+   ]
+  },
+  {
+   "name": "DJI 5.1 ГГц (деякі регіони)",
+   "kind": "control",
+   "start_mhz": 5150,
+   "stop_mhz": 5250,
+   "makers": [
+    "DJI"
+   ]
+  },
+  {
+   "name": "Autel SkyLink 900 / 2.4 / 5.8",
+   "kind": "control",
+   "start_mhz": 902,
+   "stop_mhz": 928,
+   "makers": [
+    "Autel"
+   ]
+  },
+  {
+   "name": "FPV відео 5.8 ГГц",
+   "kind": "video",
+   "start_mhz": 4990,
+   "stop_mhz": 5950,
+   "makers": [
+    "різні"
+   ]
+  },
+  {
+   "name": "FPV відео 1.2–1.3 ГГц",
+   "kind": "video",
+   "start_mhz": 1000,
+   "stop_mhz": 1400,
+   "makers": [
+    "різні"
+   ]
+  },
+  {
+   "name": "FPV відео 3.3 ГГц",
+   "kind": "video",
+   "start_mhz": 3150,
+   "stop_mhz": 3500,
+   "makers": [
+    "різні"
+   ]
+  },
+  {
+   "name": "FPV відео 2.4 ГГц (аналог)",
+   "kind": "video",
+   "start_mhz": 2370,
+   "stop_mhz": 2510,
+   "makers": [
+    "різні"
+   ]
+  }
+ ]
+}

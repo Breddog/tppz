@@ -325,7 +325,7 @@ class _VideoTabState extends State<VideoTab> {
     Navigator.of(context).push(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => _FullscreenVideo(
+        builder: (_) => FullscreenVideo(
           screen: _screen,
           freq: () => _freqMhz,
           onStep: (d) => _tune(_freqMhz + d, immediate: true),
@@ -1182,8 +1182,8 @@ class _GainCard extends StatelessWidget {
 
 /// Повноекранне відео: власна сторінка з керуванням; орієнтація й системні панелі
 /// відновлюються при БУДЬ-ЯКОМУ виході (кнопка «Назад», жест, кнопка закриття).
-class _FullscreenVideo extends StatefulWidget {
-  const _FullscreenVideo({required this.screen, required this.freq, required this.onStep, required this.stats});
+class FullscreenVideo extends StatefulWidget {
+  const FullscreenVideo({super.key, required this.screen, required this.freq, required this.onStep, required this.stats});
 
   final Widget Function() screen;
   final double Function() freq;
@@ -1191,10 +1191,10 @@ class _FullscreenVideo extends StatefulWidget {
   final VideoStats? Function() stats;
 
   @override
-  State<_FullscreenVideo> createState() => _FullscreenVideoState();
+  State<FullscreenVideo> createState() => FullscreenVideoState();
 }
 
-class _FullscreenVideoState extends State<_FullscreenVideo> {
+class FullscreenVideoState extends State<FullscreenVideo> {
   bool _controls = true;
   Timer? _hide;
   Timer? _tick;

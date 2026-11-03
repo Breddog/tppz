@@ -60,6 +60,8 @@ jobs:
           echo "SDRWATCH_KEYSTORE_PASS=$P" >> $GITHUB_ENV
           keytool -list -v -keystore $D/release.p12 -storepass "$P" | grep -m1 SHA256
 
+      # База частотних сіток для режиму «HackRF напряму» — та сама, що на модулі
+      - run: cp ../pi/sdrwatch/data/channels.json assets/channels.json
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test test/baseband_decoder_test.dart test/decoder_worker_test.dart

@@ -21,6 +21,8 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // HackRF напряму через USB OTG (режим без Raspberry Pi)
+        HackRfDirect(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "sdrwatch/net").setMethodCallHandler { call, result ->
             val cm = getSystemService(ConnectivityManager::class.java)
             try {
