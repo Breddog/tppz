@@ -29,6 +29,9 @@ class ControlLockedException extends ApiException {
   ControlLockedException(super.message);
 }
 
+/// Адреса модуля, з'єднаного з телефоном кабелем Ethernet напряму (NetworkManager «shared»).
+const kCableHost = '10.42.0.1';
+
 /// Клієнт API одного модуля. Пробує всі адреси модуля (LAN, VPN, домен) і запам'ятовує робочу.
 class ApiClient {
   ApiClient(this.device);
@@ -60,9 +63,22 @@ class ApiClient {
       if (_workingBase[device.id] != null) _workingBase[device.id]!,
       ...device.urls.where((u) => u != _workingBase[device.id]),
     ];
+    // Кабель Ethernet напряму (телефон ↔ модуль через USB-Ethernet перехідник): модуль роздає
+    // адреси сам і завжди має 10.42.0.1 — пробуємо її для будь-якого модуля
+    final port = Uri.tryParse(device.urls.isEmpty ? '' : device.urls.first)?.port ?? 8080;
+    final cable = 'http://$kCableHost:${port == 0 ? 8080 : port}';
+    if (!candidates.contains(cable)) candidates.add(cable);
     for (final u in candidates) {
       try {
-        final r = await http.get(Uri.parse('$u/api/ping')).timeout(timeout);
+        final r = await http.get(Uri.parse('$u/api/ping')).timeout(u == cable ? const Duration(seconds: 2) : timeout);
+        if (r.statusCode == 200 && u == cable) {
+          // за кабелем може бути інший модуль — перевіряємо id
+          final id = (jsonDecode(r.body) as Map)['id'];
+          if (id != null && id != device.id) {
+            errors.add('$u → інший модуль ($id)');
+            continue;
+          }
+        }
         if (r.statusCode == 200) {
           _base = u;
           _workingBase[device.id] = u;

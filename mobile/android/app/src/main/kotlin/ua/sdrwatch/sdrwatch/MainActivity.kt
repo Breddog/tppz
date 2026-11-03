@@ -27,7 +27,18 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "bindWifi" -> {
                         @Suppress("DEPRECATION")
-                        val wifi = cm.allNetworks.firstOrNull { n ->
+                        val nets = cm.allNetworks
+                        // Кабель Ethernet до модуля (USB-Ethernet перехідник) — найнадійніший канал: першим
+                        val eth = nets.firstOrNull { n ->
+                            val c = cm.getNetworkCapabilities(n)
+                            c?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true &&
+                                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) != true
+                        }
+                        if (eth != null) {
+                            result.success(cm.bindProcessToNetwork(eth))
+                            return@setMethodCallHandler
+                        }
+                        val wifi = nets.firstOrNull { n ->
                             cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
                         }
                         val caps = wifi?.let { cm.getNetworkCapabilities(it) }

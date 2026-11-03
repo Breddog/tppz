@@ -20,6 +20,8 @@ else
   apt-get install -y --no-install-recommends $PKGS
   apt-get install -y --no-install-recommends python3-lgpio python3-gpiozero || true
 fi
+# DHCP-сервер для кабелю Ethernet напряму до телефону (NetworkManager «shared»); без інтернету — пропуск
+dpkg -s dnsmasq-base >/dev/null 2>&1 || apt-get install -y --no-install-recommends dnsmasq-base 2>/dev/null || true
 
 echo "==> Користувач і теки"
 id sdrwatch >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -G plugdev sdrwatch
@@ -114,6 +116,46 @@ method=auto
 method=auto
 N
   chmod 600 /etc/NetworkManager/system-connections/sdrdetect.nmconnection
+fi
+
+echo "==> Ethernet: роутер (DHCP) або кабель напряму до телефону (модуль роздає адресу, сам — 10.42.0.1)"
+# 1) звичайна мережа з роутером: DHCP; якщо за 8 с адреси немає —
+# 2) кабель напряму (USB-Ethernet перехідник телефону): модуль сам роздає адресу, його адреса 10.42.0.1
+if [ ! -f /etc/NetworkManager/system-connections/sdrwatch-eth.nmconnection ]; then
+  cat > /etc/NetworkManager/system-connections/sdrwatch-eth.nmconnection <<'N'
+[connection]
+id=sdrwatch-eth
+type=ethernet
+interface-name=eth0
+autoconnect=true
+autoconnect-priority=10
+autoconnect-retries=1
+
+[ipv4]
+method=auto
+dhcp-timeout=8
+may-fail=false
+
+[ipv6]
+method=ignore
+N
+  cat > /etc/NetworkManager/system-connections/sdrwatch-direct.nmconnection <<'N'
+[connection]
+id=sdrwatch-direct
+type=ethernet
+interface-name=eth0
+autoconnect=true
+autoconnect-priority=0
+
+[ipv4]
+method=shared
+address1=10.42.0.1/24
+
+[ipv6]
+method=ignore
+N
+  chmod 600 /etc/NetworkManager/system-connections/sdrwatch-eth.nmconnection \
+    /etc/NetworkManager/system-connections/sdrwatch-direct.nmconnection
 fi
 [ "$IMAGE" = 0 ] && nmcli connection reload 2>/dev/null || true
 
