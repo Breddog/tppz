@@ -9,7 +9,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api.dart';
 import '../live.dart';
 import '../video/baseband_decoder.dart';
-import 'audio_panel.dart';
 
 /// Вкладка «Відео» — ГОЛОВНИЙ екран: живе відео в реальному часі.
 ///
@@ -22,7 +21,6 @@ class VideoTab extends StatefulWidget {
     required this.api,
     required this.active,
     this.watchRequest,
-    this.listenRequest,
     this.onShowInEfir,
   });
 
@@ -33,7 +31,6 @@ class VideoTab extends StatefulWidget {
   final ValueNotifier<double?>? watchRequest;
 
   /// Запит «слухати цю частоту» ззовні, Гц — перемикає на «Звук».
-  final ValueNotifier<double?>? listenRequest;
 
   /// Показати частоту на спектрі («Ефір»).
   final void Function(double hz)? onShowInEfir;
@@ -71,13 +68,11 @@ class _VideoTabState extends State<VideoTab> {
   double _dwell = 3;
   String _scanMode = 'full'; // full | range | grids (сітки — окремий, не основний режим)
   bool _modeSynced = false; // підхопити режим, у якому вже працює модуль
-  bool _scanAudio = true;
   final _fromCtl = TextEditingController(text: '900');
   final _toCtl = TextEditingController(text: '1400');
   // Мініатюри підтвердженого відео: ключ — частота, МГц (округлена до 1)
   final Map<int, ui.Image> _thumbs = {};
   final Map<int, DateTime> _thumbAt = {};
-  String _section = 'video'; // 'video' | 'audio'
   final Set<String> _scanBands = {'R', 'F', 'A', 'B', 'E', '1G2', '3G3'};
   // Аналогові сітки з бази модуля (оновлюється без перепрошивки)
   List<Map<String, dynamic>> _gridBands = const [];
@@ -111,7 +106,6 @@ class _VideoTabState extends State<VideoTab> {
     super.initState();
     _loadGrids();
     widget.watchRequest?.addListener(_onWatchRequest);
-    widget.listenRequest?.addListener(_onListenRequest);
   }
 
   void _onWatchRequest() {
@@ -121,27 +115,17 @@ class _VideoTabState extends State<VideoTab> {
     _goVideo(hz);
   }
 
-  void _onListenRequest() {
-    if (widget.listenRequest?.value == null || !mounted) return;
-    _close();
-    setState(() => _section = 'audio'); // AudioPanel сам підхопить запит
-  }
-
   /// Перейти на відео на частоті: зупинити автоскан і стежити за нею.
   Future<void> _goVideo(double hz) async {
     final auto = context.read<LiveConnection>().watch?['autoscan'];
     if (auto != null) await _autoscan(false);
-    setState(() {
-      _section = 'video';
-      _started = true;
-    });
+    setState(() => _started = true);
     _tune(hz / 1e6, immediate: true);
   }
 
   @override
   void dispose() {
     widget.watchRequest?.removeListener(_onWatchRequest);
-    widget.listenRequest?.removeListener(_onListenRequest);
     for (final t in _thumbs.values) {
       t.dispose();
     }
@@ -317,7 +301,6 @@ class _VideoTabState extends State<VideoTab> {
       'circular': _circular,
       'dwell_s': _dwell,
       'mode': _scanMode,
-      'audio': _scanAudio,
       if (_scanMode == 'range') 'start_hz': (double.tryParse(_fromCtl.text.replaceAll(',', '.')) ?? 900) * 1e6,
       if (_scanMode == 'range') 'stop_hz': (double.tryParse(_toCtl.text.replaceAll(',', '.')) ?? 1400) * 1e6,
     }),
@@ -372,35 +355,6 @@ class _VideoTabState extends State<VideoTab> {
     final minMhz = ((sdr['min_freq_hz'] as num?)?.toDouble() ?? 1e6) / 1e6;
     final maxMhz = ((sdr['max_freq_hz'] as num?)?.toDouble() ?? 6e9) / 1e6;
 
-    final sectionSwitch = Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-      child: SegmentedButton<String>(
-        segments: const [
-          ButtonSegment(value: 'video', icon: Icon(Icons.videocam), label: Text('Відео')),
-          ButtonSegment(value: 'audio', icon: Icon(Icons.headphones), label: Text('Звук')),
-        ],
-        selected: {_section},
-        onSelectionChanged: (sel) => setState(() {
-          _section = sel.first;
-          if (_section == 'audio') {
-            _close();
-          } else {
-            _started = false; // повернулися до відео — знову увімкнути стеження
-          }
-        }),
-      ),
-    );
-    if (_section == 'audio') {
-      return Column(
-        children: [
-          sectionSwitch,
-          Expanded(
-            child: AudioPanel(api: widget.api, listenRequest: widget.listenRequest),
-          ),
-        ],
-      );
-    }
-
     // Завжди тримаємо режим стеження, щоб екран був живий
     if (widget.active) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -409,9 +363,7 @@ class _VideoTabState extends State<VideoTab> {
         if (!_started && l.connected) {
           _started = true;
           final cur = (l.watch?['freq_hz'] as num?)?.toDouble() ?? (l.status['watch_freq_hz'] as num?)?.toDouble();
-          if (l.audio?['active'] == true) {
-            // Слухаємо звук — не перебивати його автосканом відео
-          } else if (l.status['mode'] != 'watch') {
+          if (l.status['mode'] != 'watch') {
             if (_autoStart) {
               _autoscan(true); // одразу шукаємо відео по колу всіх сіток
             } else {
@@ -445,14 +397,12 @@ class _VideoTabState extends State<VideoTab> {
       _scanMode = auto['mode'] as String? ?? _scanMode;
       _circular = auto['circular'] as bool? ?? _circular;
       _dwell = ((auto['dwell_s'] as num?)?.toDouble() ?? _dwell).clamp(1, 15);
-      _scanAudio = auto['audio'] as bool? ?? _scanAudio;
     }
     final hasPicture = _src == 'baseband' ? _img.value != null : _jpeg.value != null;
 
     return ListView(
       padding: const EdgeInsets.only(bottom: 20),
       children: [
-        sectionSwitch,
         // ---- екран ----
         GestureDetector(
           onDoubleTap: _fullscreen,
@@ -709,21 +659,10 @@ class _VideoTabState extends State<VideoTab> {
                     tilePadding: EdgeInsets.zero,
                     dense: true,
                     title: Text(
-                      'Параметри: ${_circular ? 'по колу, показ ${_dwell.round()} с' : 'зупинка на відео'}'
-                      '${_scanAudio ? ', + голос' : ''}',
+                      'Параметри: ${_circular ? 'по колу, показ ${_dwell.round()} с' : 'зупинка на відео'}',
                       style: const TextStyle(fontSize: 13),
                     ),
                     children: [
-                      SwitchListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Шукати й голос (рації < 1.3 ГГц)'),
-                        value: _scanAudio,
-                        onChanged: (v) {
-                          setState(() => _scanAudio = v);
-                          if (auto != null) _autoscan(true);
-                        },
-                      ),
                       SwitchListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
@@ -773,10 +712,6 @@ class _VideoTabState extends State<VideoTab> {
             found: (auto['found'] as List).cast<Map<String, dynamic>>(),
             thumbFor: _thumbFor,
             onVideo: (hz) => _goVideo(hz),
-            onListen: (hz) {
-              widget.listenRequest?.value = hz;
-              _onListenRequest();
-            },
             onEfir: widget.onShowInEfir,
           ),
 
@@ -1082,21 +1017,17 @@ class _FoundList extends StatelessWidget {
     required this.found,
     required this.thumbFor,
     required this.onVideo,
-    required this.onListen,
     this.onEfir,
   });
 
   final List<Map<String, dynamic>> found;
   final ui.Image? Function(double mhz) thumbFor;
   final void Function(double hz) onVideo;
-  final void Function(double hz) onListen;
   final void Function(double hz)? onEfir;
 
   @override
   Widget build(BuildContext context) {
     final videos = found.where((e) => e['type'] == 'video').toList();
-    final voices = found.where((e) => e['type'] == 'audio').toList()
-      ..sort((a, b) => ((b['last_seen'] as num?) ?? 0).compareTo((a['last_seen'] as num?) ?? 0));
     String ago(Map<String, dynamic> e) {
       final t = (e['last_seen'] as num?)?.toDouble();
       if (t == null) return '';
@@ -1171,29 +1102,6 @@ class _FoundList extends StatelessWidget {
                   ],
                 ),
               ),
-            ],
-            if (voices.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Голос / вузькі сигнали (${voices.length}) — натисніть, щоб слухати',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              for (final e in voices.take(12))
-                ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.record_voice_over, color: Colors.lightBlueAccent),
-                  title: Text('${(e['freq_mhz'] as num).toStringAsFixed(4)} МГц'),
-                  subtitle: Text('+${e['level_db']} дБ над шумом · ${ago(e)} · бачено ${e['hits']}×'),
-                  onTap: () => onListen((e['freq_mhz'] as num).toDouble() * 1e6),
-                  trailing: onEfir == null
-                      ? null
-                      : IconButton(
-                          icon: const Icon(Icons.ssid_chart),
-                          tooltip: 'Показати в «Ефірі»',
-                          onPressed: () => onEfir!((e['freq_mhz'] as num).toDouble() * 1e6),
-                        ),
-                ),
             ],
           ],
         ),

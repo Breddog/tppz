@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import collections
 import logging
+import threading
 import time
 
 import numpy as np
@@ -22,6 +24,120 @@ KNOWN_LIMITS = {
 }
 
 
+# Після перенастройки частоти відкидаємо відліки, що вже були «в дорозі»: libhackrf тримає
+# 4 USB-передачі по 131072 відліки (~26 мс при 20 МГц) + ~1 мс на захоплення PLL.
+INFLIGHT_SAMPLES = 4 * 131072
+SETTLE_S = 0.001
+CHUNK = 65536                  # відліків за один readStream
+MAX_BACKLOG_S = 0.25           # більше в кільці не тримаємо — найстаріше відкидається
+
+
+class RxReader:
+    """Окремий потік БЕЗПЕРЕРВНО забирає відліки з драйвера в кільце (як SDR++/gqrx).
+
+    Без нього програма читала «на вимогу»: поки вона рахувала кадр, буфер драйвера переповнювався,
+    а після перенастройки перші ~26 мс ще були зі СТАРОЇ частоти. Тепер:
+      • драйвер ніколи не переповнюється (немає «дір» і рваних кадрів);
+      • після tune() точно відкидається те, що було в дорозі (retune());
+      • read(n) віддає найсвіжіші n відліків — затримка не накопичується.
+    Перетворення int8 → complex64 — лише для того, що справді прочитали."""
+
+    def __init__(self, src: "SoapySource") -> None:
+        self.src = src
+        self.cv = threading.Condition()
+        self.chunks: collections.deque = collections.deque()
+        self.avail = 0
+        self.skip = 0
+        self.run = False
+        self.overflows = 0
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.run = True
+        self.thread = threading.Thread(target=self._loop, daemon=True, name="sdr-rx")
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.run = False
+        if self.thread:
+            self.thread.join(timeout=2)
+        self.thread = None
+        with self.cv:
+            self.chunks.clear()
+            self.avail = 0
+
+    def retune(self, discard: int) -> None:
+        with self.cv:
+            self.chunks.clear()
+            self.avail = 0
+            self.skip = discard
+
+    def _loop(self) -> None:
+        src = self.src
+        cs8 = src._cs8
+        buf = np.empty(2 * CHUNK, np.int8) if cs8 else np.empty(CHUNK, np.complex64)
+        while self.run:
+            try:
+                sr = src.dev.readStream(src.stream, [buf], CHUNK, timeoutUs=200000)
+            except Exception:  # noqa: BLE001 — плату від'єднали: сторожовий таймер перепідключить
+                time.sleep(0.05)
+                continue
+            n = sr.ret
+            if n <= 0:
+                if n == -4:
+                    self.overflows += 1
+                else:
+                    time.sleep(0.002)
+                continue
+            data = buf[: 2 * n].copy() if cs8 else buf[:n].copy()
+            with self.cv:
+                if self.skip:
+                    k = min(self.skip, n)
+                    self.skip -= k
+                    if k == n:
+                        continue
+                    data = data[2 * k:] if cs8 else data[k:]
+                    n -= k
+                self.chunks.append(data)
+                self.avail += n
+                limit = int(src.sample_rate * MAX_BACKLOG_S) + CHUNK
+                while self.avail > limit and len(self.chunks) > 1:
+                    old = self.chunks.popleft()
+                    self.avail -= len(old) // 2 if cs8 else len(old)
+                self.cv.notify_all()
+
+    def read(self, n: int, timeout_s: float) -> np.ndarray:
+        cs8 = self.src._cs8
+        w = 2 if cs8 else 1
+        deadline = time.monotonic() + timeout_s
+        with self.cv:
+            while self.avail < n:
+                left = deadline - time.monotonic()
+                if left <= 0 or not self.run:
+                    break
+                self.cv.wait(left)
+            # найсвіжіші дані: зайве старе (більше ніж n + 1 блок) — відкинути
+            while self.avail - (len(self.chunks[0]) // w if self.chunks else 0) >= n and len(self.chunks) > 1:
+                old = self.chunks.popleft()
+                self.avail -= len(old) // w
+            parts, got = [], 0
+            while self.chunks and got < n:
+                c = self.chunks.popleft()
+                cn = len(c) // w
+                take = min(cn, n - got)
+                parts.append(c[: take * w])
+                if take < cn:
+                    self.chunks.appendleft(c[take * w:])
+                got += take
+                self.avail -= take
+        if not parts:
+            return np.zeros(0, np.complex64)
+        raw = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        if cs8:
+            return np.multiply(raw, np.float32(1 / 128), dtype=np.float32).view(np.complex64)
+        return raw
+
+
 class SoapySource(SdrSource):
     def __init__(self, device_args: str = "driver=hackrf", ppm: float = 0.0) -> None:
         super().__init__()
@@ -30,6 +146,9 @@ class SoapySource(SdrSource):
         self.dev = None
         self.stream = None
         self._buf = None
+        self._cs8 = False
+        self.rx: RxReader | None = None
+        self.retune_discard = INFLIGHT_SAMPLES
         driver = dict(kv.split("=", 1) for kv in device_args.split(",") if "=" in kv).get("driver", "hackrf")
         self.name = driver
         lim = KNOWN_LIMITS.get(driver)
@@ -75,21 +194,20 @@ class SoapySource(SdrSource):
         log.info("SDR відкрито: %s (передача: %s)", self.device_args, "є" if self.can_transmit else "немає")
 
     def close(self) -> None:
-        if self.dev is not None and self.stream is not None:
-            try:
-                self.dev.deactivateStream(self.stream)
-                self.dev.closeStream(self.stream)
-            except Exception:  # noqa: BLE001
-                pass
+        if self.dev is not None:
+            self._stop_stream()
         self.dev = None
         self.stream = None
 
     def tune(self, freq_hz: float) -> None:
         freq_hz = float(np.clip(freq_hz, self.min_freq_hz, self.max_freq_hz))
+        if abs(freq_hz - (self.center_hz or 0)) < 1 and self.rx is not None:
+            return                       # та сама частота — PLL не чіпаємо, потік не рветься
         self.dev.setFrequency(self._rx, 0, freq_hz)
         self.center_hz = freq_hz
-        # Скинути «старі» відліки з буфера після перебудови PLL
-        self._flush()
+        # Відкинути відліки, що були «в дорозі» зі старої частоти + час захоплення PLL
+        if self.rx is not None:
+            self.rx.retune(self.retune_discard + int(self.sample_rate * SETTLE_S))
 
     def _apply_rate(self, rate: float) -> None:
         rate = min(rate, self.max_sample_rate)
@@ -122,8 +240,14 @@ class SoapySource(SdrSource):
         if not self._cs8:
             self.stream = self.dev.setupStream(self._rx, SOAPY_SDR_CF32)
         self.dev.activateStream(self.stream)
+        self.rx = RxReader(self)
+        self.rx.retune(int(self.sample_rate * SETTLE_S))
+        self.rx.start()
 
     def _stop_stream(self) -> None:
+        if self.rx is not None:
+            self.rx.stop()
+            self.rx = None
         if getattr(self, "stream", None) is None:
             return
         try:
@@ -171,10 +295,7 @@ class SoapySource(SdrSource):
         from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_TX
         tx = SOAPY_SDR_TX
         # Звільнити приймальний тракт (HackRF — напівдуплекс)
-        try:
-            self.dev.deactivateStream(self.stream)
-        except Exception:  # noqa: BLE001
-            pass
+        self._stop_stream()
         self.dev.setSampleRate(tx, 0, min(sample_rate, self.max_sample_rate))
         try:
             self.dev.setBandwidth(tx, 0, min(sample_rate, self.max_sample_rate) * 0.9)
@@ -216,9 +337,10 @@ class SoapySource(SdrSource):
                 pass
             self.tx_stream = None
         try:
-            self.dev.activateStream(self.stream)      # повернути приймання
+            self.center_hz = 0.0                      # після TX частоту приймання виставити заново
+            self._start_stream()                      # повернути приймання (новий потік)
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("Не вдалося повернути приймання після TX")
         log.info("TX вимкнено")
 
     def set_bias_tee(self, on: bool) -> None:
@@ -230,37 +352,8 @@ class SoapySource(SdrSource):
             except Exception:  # noqa: BLE001 — назва налаштування залежить від драйвера
                 continue
 
-    def _flush(self, ms: float = 2.0) -> None:
-        if self.sample_rate:
-            self.read(int(self.sample_rate * ms / 1000), timeout_us=20000)
-
     def read(self, n: int, timeout_us: int = 500000) -> np.ndarray:
-        if getattr(self, "_cs8", False):
-            return self._read_cs8(n, timeout_us)
-        out = np.empty(n, dtype=np.complex64)
-        got = 0
-        deadline = time.monotonic() + max(1.0, n / max(self.sample_rate, 1.0) * 4)
-        while got < n:
-            sr = self.dev.readStream(self.stream, [out[got:]], n - got, timeoutUs=timeout_us)
-            if sr.ret > 0:
-                got += sr.ret
-            elif sr.ret == -4:  # SOAPY_SDR_OVERFLOW — пропуск відліків, читаємо далі
-                continue
-            elif time.monotonic() > deadline:
-                break
-        return out[:got] if got < n else out
-
-    def _read_cs8(self, n: int, timeout_us: int) -> np.ndarray:
-        buf = np.empty(2 * n, dtype=np.int8)
-        got = 0
-        deadline = time.monotonic() + max(1.0, n / max(self.sample_rate, 1.0) * 4)
-        while got < n:
-            sr = self.dev.readStream(self.stream, [buf[2 * got:]], n - got, timeoutUs=timeout_us)
-            if sr.ret > 0:
-                got += sr.ret
-            elif sr.ret == -4:  # переповнення — пропуск відліків, читаємо далі
-                continue
-            elif time.monotonic() > deadline:
-                break
-        # int8 I,Q → complex64, повна шкала 128
-        return np.multiply(buf[: 2 * got], np.float32(1 / 128), dtype=np.float32).view(np.complex64)
+        """n найсвіжіших відліків поточної частоти (complex64). Менше — якщо плата не дала даних."""
+        if self.rx is None:
+            return np.zeros(0, np.complex64)
+        return self.rx.read(n, max(timeout_us / 1e6, n / max(self.sample_rate, 1.0) * 4, 0.5))

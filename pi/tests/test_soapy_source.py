@@ -48,7 +48,14 @@ class FakeDev:
     def getNumChannels(self, d):
         return 1
 
+    def setFrequency(self, d, c, f):
+        FakeDev.log.append(("freq", f))
+        self.marker = int(f / 1e6) % 100
+
     def readStream(self, s, bufs, n, timeoutUs=0):
+        import time
+        time.sleep(n / self.rate)          # як справжня плата: дані з темпом частоти дискретизації
+        bufs[0][: 2 * n] = getattr(self, "marker", 1)
         return types.SimpleNamespace(ret=n)
 
 
@@ -78,6 +85,16 @@ def test_stream_lifecycle(monkeypatch):
     # читання CS8 → complex64
     iq = src.read(1000)
     assert iq.dtype == np.complex64 and len(iq) == 1000
+    # перенастройка: старі відліки (маркер попередньої частоти) не потрапляють у read()
+    src.set_sample_rate(20e6)
+    src.tune(5e6)
+    src.read(10000)
+    src.tune(7e6)
+    FakeDev.log.clear()
+    src.tune(7e6)                        # та сама частота — PLL не чіпаємо
+    assert FakeDev.log == []
+    iq = src.read(20000)
+    assert np.allclose(iq.real, 7 / 128)
     # двічі без даних — далі CF32
     src.note_no_data()
     src.note_no_data()

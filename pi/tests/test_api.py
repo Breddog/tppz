@@ -205,41 +205,16 @@ def test_network_and_home(client):
     assert "Мережа" in home and "addwifi" in home and "sdrdetect" in home
 
 
-def test_audio_and_autoscan(client):
+def test_autoscan_grids(client):
     import time
 
     h = {"Authorization": "Bearer secret"}
-    r = client.post("/api/audio/start", json={"freq_hz": 446.0e6, "mod": "nfm", "squelch_db": 10}, headers=h)
-    assert r.status_code == 200 and r.json()["active"] and r.json()["mod"] == "nfm"
-    assert client.post("/api/audio/params", json={"squelch_db": 20, "mod": "am"}, headers=h).json()["mod"] == "am"
-    assert client.post("/api/audio/start", json={"mod": "xx", "freq_hz": 1e8}, headers=h).status_code == 400
-    assert client.post("/api/audio/stop", headers=h).json()["active"] is False
+    assert client.post("/api/audio/start", json={"freq_hz": 1e8}, headers=h).status_code == 404   # звук прибрано
     r = client.post("/api/control/video_autoscan", json={"on": True, "bands": ["R"]}, headers=h)
     assert r.status_code == 200 and r.json()["channels"] == 8
     time.sleep(0.3)
     assert client.get("/api/status", headers=h).json()["mode"] == "watch"
     client.post("/api/control/scan", headers=h)
-
-
-def test_audio_demod_tone():
-    """Демодульований звук рації — чистий тон 1 кГц без перевантаження (ЧМ і АМ)."""
-    import numpy as np
-
-    from sdrwatch.dsp.audio import AUDIO_RATE, SDR_RATE, TUNE_OFFSET, AudioDemod
-    from sdrwatch.sources.simulated import Emitter, SimulatedSource
-
-    for mode in ("nfm", "am"):
-        f = 446e6
-        s = SimulatedSource([Emitter(f, mode, power_dbm=-80, bandwidth_hz=20e3)], noise_dbfs=-60)
-        s.set_sample_rate(SDR_RATE)
-        s.set_gain(32, 30, False)
-        s.tune(f + TUNE_OFFSET)
-        d = AudioDemod(mode)
-        pcm = np.concatenate([d.process(s.read(240000), -TUNE_OFFSET)[0] for _ in range(4)][1:]).astype(float)
-        sp = np.abs(np.fft.rfft((pcm - pcm.mean()) * np.hanning(len(pcm))))
-        fr = np.fft.rfftfreq(len(pcm), 1 / AUDIO_RATE)
-        assert abs(fr[np.argmax(sp[5:]) + 5] - 1000) < 20
-        assert 3000 < np.abs(pcm).max() < 32767      # чутно і без кліпінгу
 
 
 def test_ws_baseband_streams_raw_video(tmp_path):
@@ -303,75 +278,6 @@ def test_autoscan_search_modes_find_video(tmp_path, mode, extra):
         eng.stop()
 
 
-def test_audio_iq_channel_for_phone():
-    """Канал для демодуляції на телефоні: 48 кГц (ЧМ вузька/АМ), 240 кГц (ЧМ широка), тон 1 кГц зберігається."""
-    import struct
-
-    import numpy as np
-
-    from sdrwatch.dsp.audio import SDR_RATE, TUNE_OFFSET, AudioDemod, iq_packet
-    from sdrwatch.sources.simulated import Emitter, SimulatedSource
-
-    f = 446e6
-    s = SimulatedSource([Emitter(f, "nfm", power_dbm=-80, bandwidth_hz=20e3)], noise_dbfs=-60)
-    s.set_sample_rate(SDR_RATE)
-    s.set_gain(32, 30, False)
-    s.tune(f + TUNE_OFFSET)
-    d = AudioDemod("nfm")
-    xs = [d.channel(s.read(120000), -TUNE_OFFSET) for _ in range(4)]
-    assert all(r == 48000 for _, r, _ in xs)
-    x = np.concatenate([a for a, _, _ in xs[1:]])
-    fm = np.angle(x[1:] * np.conj(x[:-1]))
-    sp = np.abs(np.fft.rfft((fm - fm.mean()) * np.hanning(len(fm))))
-    fr = np.fft.rfftfreq(len(fm), 1 / 48000)
-    assert abs(fr[np.argmax(sp[5:]) + 5] - 1000) < 20
-    pkt = iq_packet(xs[1][0], 48000, f, "nfm", 25.0, 10.0, True)
-    magic, ver, mode, flags, freq, rate, scale, lvl, sq, n = struct.unpack_from("<4sBBHdffffI", pkt)
-    assert magic == b"SDRA" and n == len(xs[1][0]) and flags == 1 and len(pkt) == 36 + 4 * n
-
-
-def test_audio_scanner_found_skip_memory(tmp_path):
-    """Сканер звуку: знаходить канали, пропускає заблоковані, сканує збережені частоти."""
-    import time as _t
-
-    from sdrwatch.sources.simulated import Emitter
-    cfg = Config()
-    cfg.storage.path = str(tmp_path / "st")
-    hub = Hub()
-    em = [Emitter(446.10625e6, "nfm", power_dbm=-70, bandwidth_hz=12e3, seed=1),
-          Emitter(446.15625e6, "nfm", power_dbm=-70, bandwidth_hz=12e3, seed=2)]
-    eng = Engine(cfg, SimulatedSource(em), Storage(cfg.storage.path, 50), None, hub)
-    eng.start()
-    try:
-        eng.start_audio(None, "nfm", 10.0, {"start_hz": 446.00625e6, "stop_hz": 446.19375e6, "step_hz": 12.5e3,
-                                             "hold_s": 0.3})
-
-        def wait_lock(timeout=10):
-            t0 = _t.time()
-            while _t.time() - t0 < timeout:
-                st = eng.audio_status()
-                if st.get("active") and not st["scanning"]:
-                    return st
-                _t.sleep(0.1)
-            raise AssertionError("не зупинився на сигналі")
-
-        st = wait_lock()
-        first = st["freq_hz"]
-        assert abs(first - 446.10625e6) < 7e3 or abs(first - 446.15625e6) < 7e3
-        assert st["scan"]["found"]
-        st = eng.audio_skip()                         # заблокувати й шукати далі
-        assert any(abs(f - first) < 1 for f in st["scan"]["lockout"])
-        _t.sleep(0.5)
-        st = wait_lock()
-        assert abs(st["freq_hz"] - first) > 20e3      # інший канал, заблокований пропущено
-        # Пам'ять: лише збережені частоти
-        eng.start_audio(None, "nfm", 10.0, {"freqs": [446.15625e6, 433.5e6], "hold_s": 0.3, "lockout": []})
-        st = wait_lock()
-        assert abs(st["freq_hz"] - 446.15625e6) < 1
-    finally:
-        eng.stop()
-
-
 def test_channels_db_update(client, tmp_path):
     h = {"Authorization": "Bearer secret"}
     db = client.get("/api/channels", headers=h).json()
@@ -413,67 +319,6 @@ def test_fast_sweep_mode(tmp_path):
         eng.set_mode("watch", 5800e6)
         _t.sleep(1.5)
         assert eng.sweeper is None and eng._opened
-    finally:
-        eng.stop()
-
-
-def test_wfm_broadcast_with_strong_neighbour():
-    """FM-мовлення: сильна сусідня станція (+400 кГц, на 20 дБ сильніша) не повинна забивати канал шумом."""
-    import numpy as np
-
-    from sdrwatch.dsp.audio import SDR_RATE, TUNE_OFFSET, AudioDemod
-    from sdrwatch.sources.simulated import Emitter, SimulatedSource
-    f = 101.5e6
-    s = SimulatedSource([Emitter(f, "wfm", power_dbm=-60, bandwidth_hz=200e3),
-                         Emitter(f + 400e3, "wfm", power_dbm=-40, bandwidth_hz=200e3, seed=3)], noise_dbfs=-70)
-    s.set_sample_rate(SDR_RATE)
-    s.set_gain(32, 30, False)
-    s.tune(f + TUNE_OFFSET)
-    d = AudioDemod("wfm")
-    x = np.concatenate([d.channel(s.read(120000), -TUNE_OFFSET)[0] for _ in range(5)][1:])
-    fm = np.angle(x[1:] * np.conj(x[:-1]))
-    fm = fm - fm.mean()
-    sp = np.abs(np.fft.rfft(fm * np.hanning(len(fm)))) ** 2
-    fr = np.fft.rfftfreq(len(fm), 1 / 240e3)
-    tone = sp[(fr > 900) & (fr < 1100)].sum()
-    audio = sp[(fr > 100) & (fr < 15e3)].sum()
-    assert tone / audio > 0.8, tone / audio
-
-
-def test_audio_autostore_and_preview(tmp_path):
-    """Як в авто: «пошук усіх станцій» знаходить усі й вмикає найсильнішу; «скан» слухає N с і йде далі."""
-    import time as _t
-
-    from sdrwatch.sources.simulated import Emitter
-    cfg = Config()
-    cfg.storage.path = str(tmp_path / "st")
-    em = [Emitter(f * 1e6, "wfm", power_dbm=p, bandwidth_hz=200e3, seed=i)
-          for i, (f, p) in enumerate([(88.8, -65), (95.4, -55), (101.5, -60), (104.0, -62)])]
-    eng = Engine(cfg, SimulatedSource(em), Storage(cfg.storage.path, 50), None, Hub())
-    eng.start()
-    try:
-        eng.start_audio(None, "wfm", 10.0, {"start_hz": 87.5e6, "stop_hz": 108e6, "step_hz": 100e3, "store": True})
-        t0 = _t.time()
-        while _t.time() - t0 < 20:
-            st = eng.audio_status()
-            if st["scan"] and st["scan"]["holding"]:
-                break
-            _t.sleep(0.2)
-        found = sorted(round(e["freq_hz"] / 1e5) / 10 for e in st["scan"]["found"])
-        for f in (88.8, 95.4, 101.5, 104.0):
-            assert f in found, found
-        assert abs(st["freq_hz"] - 95.4e6) < 50e3          # найсильніша
-        # «Скан»: по 0.5 с на станцію — частота має змінюватися сама
-        eng.start_audio(None, "wfm", 10.0, {"start_hz": 87.5e6, "stop_hz": 108e6, "step_hz": 100e3,
-                                             "preview_s": 0.5, "lockout": []})
-        seen = set()
-        t0 = _t.time()
-        while _t.time() - t0 < 12 and len(seen) < 3:
-            st = eng.audio_status()
-            if not st["scanning"]:
-                seen.add(round(st["freq_hz"] / 1e5))
-            _t.sleep(0.1)
-        assert len(seen) >= 3, seen
     finally:
         eng.stop()
 

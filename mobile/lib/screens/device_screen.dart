@@ -35,7 +35,6 @@ class _DeviceScreenState extends State<DeviceScreen> {
   NotifySettings? _ns;
   // Переходи між вкладками: «дивитися відео тут» / «слухати тут»
   final _watchReq = ValueNotifier<double?>(null);
-  final _listenReq = ValueNotifier<double?>(null);
 
   void _onMaskAlarm() {
     if (!mounted) return;
@@ -58,11 +57,6 @@ class _DeviceScreenState extends State<DeviceScreen> {
   void _watchFreq(double hz) {
     setState(() => _tab = 0);
     _watchReq.value = hz;
-  }
-
-  void _listenFreq(double hz) {
-    setState(() => _tab = 0);
-    _listenReq.value = hz;
   }
 
   void _showInEfir(double hz) {
@@ -98,7 +92,6 @@ class _DeviceScreenState extends State<DeviceScreen> {
   void dispose() {
     _evSub?.cancel();
     _watchReq.dispose();
-    _listenReq.dispose();
     live.dispose();
     super.dispose();
   }
@@ -163,10 +156,9 @@ class _DeviceScreenState extends State<DeviceScreen> {
               api: api,
               active: _tab == 0,
               watchRequest: _watchReq,
-              listenRequest: _listenReq,
               onShowInEfir: _showInEfir,
             ),
-            LiveTab(onSignal: openSignal, onWatchFreq: _watchFreq, onListenFreq: _listenFreq),
+            LiveTab(onSignal: openSignal, onWatchFreq: _watchFreq),
             SignalsTab(onSignal: openSignal, onWatch: watchSignal),
             HistoryTab(api: api),
             ControlTab(api: api, device: widget.device),
@@ -203,11 +195,10 @@ class _DeviceScreenState extends State<DeviceScreen> {
 enum ViewMode { spectrum, waterfall, both, multi }
 
 class LiveTab extends StatefulWidget {
-  const LiveTab({super.key, required this.onSignal, this.onWatchFreq, this.onListenFreq});
+  const LiveTab({super.key, required this.onSignal, this.onWatchFreq});
 
   final void Function(Signal) onSignal;
   final void Function(double hz)? onWatchFreq;
-  final void Function(double hz)? onListenFreq;
 
   @override
   State<LiveTab> createState() => _LiveTabState();
@@ -531,14 +522,6 @@ class _LiveTabState extends State<LiveTab> {
                     onPressed: () {
                       Navigator.pop(ctx);
                       widget.onWatchFreq?.call(hz);
-                    },
-                  ),
-                  FilledButton.tonalIcon(
-                    icon: const Icon(Icons.headphones),
-                    label: const Text('Слухати тут'),
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      widget.onListenFreq?.call(hz);
                     },
                   ),
                   OutlinedButton.icon(

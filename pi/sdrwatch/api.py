@@ -53,26 +53,6 @@ class EchoReq(BaseModel):
     relearn: bool = False
 
 
-class AudioReq(BaseModel):
-    freq_hz: float | None = None
-    mod: str = "nfm"                 # nfm | wfm | am
-    squelch_db: float = 10.0
-    scan_start_hz: float | None = None   # автоскан: діапазон і крок сітки
-    scan_stop_hz: float | None = None
-    scan_step_hz: float = 12.5e3
-    scan_freqs: list[float] | None = None   # сканування збережених частот (пам'ять)
-    hold_s: float = 2.0                     # затримка після кінця передачі, с
-    lockout: list[float] | None = None      # заблоковані (пропущені) частоти
-    preview_s: float = 0.0                  # «скан» як в авто: слухати кожну станцію N с (0 — поки звучить)
-    store: bool = False                     # «пошук усіх станцій»: коло без зупинок → найсильніша
-
-
-class AudioParams(BaseModel):
-    squelch_db: float | None = None
-    mod: str | None = None
-    freq_hz: float | None = None
-
-
 class TimeReq(BaseModel):
     ts: float
     lat: float | None = None
@@ -87,7 +67,6 @@ class VideoAutoscanReq(BaseModel):
     mode: str = "grids"            # grids | full | range
     start_hz: float | None = None
     stop_hz: float | None = None
-    audio: bool = True             # шукати й голос (вузькі сигнали < 1.3 ГГц)
 
 
 class WifiReq(BaseModel):
@@ -442,47 +421,11 @@ def create_app(app_state) -> FastAPI:
         st.cfg.save()
         return res
 
-    # ---- звук з ефіру ----------------------------------------------------------------------------
-    @app.get("/api/audio", dependencies=[Depends(auth)])
-    def audio_status():
-        return st.engine.audio_status()
-
-    @app.post("/api/audio/start", dependencies=[Depends(require_control)])
-    def audio_start(req: AudioReq):
-        scan = None
-        if req.scan_freqs:
-            scan = {"freqs": req.scan_freqs, "hold_s": req.hold_s, "lockout": req.lockout,
-                    "preview_s": req.preview_s}
-        elif req.scan_start_hz and req.scan_stop_hz:
-            scan = {"start_hz": req.scan_start_hz, "stop_hz": req.scan_stop_hz, "step_hz": req.scan_step_hz,
-                    "hold_s": req.hold_s, "lockout": req.lockout, "preview_s": req.preview_s, "store": req.store}
-        try:
-            return st.engine.start_audio(req.freq_hz, req.mod, req.squelch_db, scan)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
-
-    @app.post("/api/audio/params", dependencies=[Depends(require_control)])
-    def audio_params(req: AudioParams):
-        return st.engine.set_audio_params(req.squelch_db, req.mod, req.freq_hz)
-
-    @app.post("/api/audio/skip", dependencies=[Depends(require_control)])
-    def audio_skip():
-        """Пропустити поточну частоту (блокування) і шукати далі."""
-        return st.engine.audio_skip()
-
-    @app.post("/api/audio/resume", dependencies=[Depends(require_control)])
-    def audio_resume(unlock: float | None = Query(None)):
-        return st.engine.audio_resume(unlock)
-
-    @app.post("/api/audio/stop", dependencies=[Depends(require_control)])
-    def audio_stop():
-        return st.engine.stop_audio()
-
     @app.post("/api/control/video_autoscan", dependencies=[Depends(require_control)])
     def video_autoscan(req: VideoAutoscanReq):
         try:
             return st.engine.set_video_autoscan(req.on, req.bands, req.circular, req.dwell_s, req.mode,
-                                                req.start_hz, req.stop_hz, req.audio)
+                                                req.start_hz, req.stop_hz)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
@@ -714,52 +657,6 @@ def create_app(app_state) -> FastAPI:
                     await ws.send_json({"type": "ping"})
                     continue
                 await ws.send_bytes(frame)
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        finally:
-            st.hub.unsubscribe(sub)
-
-    @app.websocket("/ws/audioiq")
-    async def ws_audioiq(ws: WebSocket, token: str | None = None):
-        """Вузька смуга звукового каналу (див. dsp/audio.py iq_packet) — демодулює телефон."""
-        try:
-            check_token(token)
-        except HTTPException:
-            await ws.close(code=4401)
-            return
-        await ws.accept()
-        sub = st.hub.subscribe("audioiq", maxsize=6)
-        try:
-            while True:
-                try:
-                    pkt = await asyncio.wait_for(sub.q.get(), timeout=10)
-                except asyncio.TimeoutError:
-                    await ws.send_json({"type": "ping"})
-                    continue
-                await ws.send_bytes(pkt)
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        finally:
-            st.hub.unsubscribe(sub)
-
-    @app.websocket("/ws/audio")
-    async def ws_audio(ws: WebSocket, token: str | None = None):
-        """Звук: бінарні блоки PCM 16-біт LE моно 24 кГц (лише коли відкритий шумодав)."""
-        try:
-            check_token(token)
-        except HTTPException:
-            await ws.close(code=4401)
-            return
-        await ws.accept()
-        sub = st.hub.subscribe("audio", maxsize=8)
-        try:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(sub.q.get(), timeout=10)
-                except asyncio.TimeoutError:
-                    await ws.send_json({"type": "ping"})
-                    continue
-                await ws.send_bytes(chunk)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
