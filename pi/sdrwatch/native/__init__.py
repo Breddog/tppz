@@ -72,6 +72,10 @@ def _setup(L):
         f = getattr(L, name)
         f.argtypes = [src_t, ctypes.c_long, ctypes.c_long, ctypes.c_float, fp, fp]
         f.restype = ctypes.c_long
+    if hasattr(L, "fm_chroma"):              # стара зібрана бібліотека може його не мати
+        L.fm_chroma.argtypes = [fp, ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_float, ctypes.c_float,
+                                fp, fp, fp]
+        L.fm_chroma.restype = ctypes.c_long
     return L
 
 
@@ -88,3 +92,21 @@ def fm_baseband(iq: np.ndarray, fs: float, decim: int) -> np.ndarray | None:
     k = L.fm_baseband(x.view(np.float32).ctypes.data_as(fp), n, decim, float(fs / (2 * np.pi)),
                       prev.ctypes.data_as(fp), out.ctypes.data_as(fp))
     return out[:k]
+
+
+def fm_chroma(iq: np.ndarray, fs: float, kl: int, kc: int, fsc: float) -> tuple[np.ndarray, np.ndarray] | None:
+    """ЧМ-детектор → (яскравість, проріджена kl, Гц; колір: комплексна огинаюча на fsc, проріджена kc).
+    None — якщо прискорення немає."""
+    L = lib()
+    if L is None or not hasattr(L, "fm_chroma"):
+        return None
+    x = np.ascontiguousarray(iq, dtype=np.complex64)
+    n = len(x)
+    luma = np.empty(n // kl, np.float32)
+    chroma = np.empty(n // kc, np.complex64)
+    prev = np.array([x[0].real, x[0].imag] if n else [1, 0], np.float32)
+    fp = ctypes.POINTER(ctypes.c_float)
+    k = L.fm_chroma(x.view(np.float32).ctypes.data_as(fp), n, kl, kc, float(fs / (2 * np.pi)),
+                    float(2 * np.pi * fsc / fs), prev.ctypes.data_as(fp), luma.ctypes.data_as(fp),
+                    chroma.view(np.float32).ctypes.data_as(fp))
+    return luma[:k], chroma[: n // kc]

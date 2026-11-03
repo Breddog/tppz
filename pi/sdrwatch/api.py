@@ -611,10 +611,11 @@ def create_app(app_state) -> FastAPI:
             st.hub.unsubscribe(sub)
 
     @app.websocket("/ws/baseband")
-    async def ws_baseband(ws: WebSocket, token: str | None = None, quality: str = "normal"):
+    async def ws_baseband(ws: WebSocket, token: str | None = None, quality: str = "normal", color: int = 0):
         """Сирий відеосигнал після ЧМ-дискримінатора (див. dsp/baseband.py) — декодує телефон.
 
         quality: economy (≈3 Мвідл/с, 4 біти) | normal (≈4 Мвідл/с, 8 біт) | detail (≈6.7 Мвідл/с).
+        color=1: додати кольорову складову (CHRM) — кольоровий кадр збирає телефон.
         """
         try:
             check_token(token)
@@ -624,6 +625,7 @@ def create_app(app_state) -> FastAPI:
         await ws.accept()
         sub = st.hub.subscribe("baseband", maxsize=2)   # затримка важливіша за повноту: старі поля викидаємо
         sub.options["quality"] = quality
+        sub.options["color"] = int(color)
         try:
             while True:
                 try:

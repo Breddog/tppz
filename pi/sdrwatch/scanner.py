@@ -1116,7 +1116,8 @@ class Engine:
                 time.sleep(wait)
             self._bb_last = time.monotonic()
             n_field = int(fs * baseband.FIELD_S)
-            pkt, info = baseband.make_packet(iq[:n_field], fs, f, self.hub.option("baseband", "quality", "normal"))
+            pkt, info = baseband.make_packet(iq[:n_field], fs, f, self.hub.option("baseband", "quality", "normal"),
+                                             color=bool(self.hub.option("baseband", "color", 0)))
             self.hub.publish("baseband", pkt)
         if colorq and not legacy:
             res_c = video.demodulate(iq, fs, 0.0, force_invert=self.video_opts["invert"], auto_contrast=False,

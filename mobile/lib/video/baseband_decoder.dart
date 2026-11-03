@@ -14,6 +14,10 @@ import 'dart:typed_data';
 class BasebandPacket {
   BasebandPacket._(this.bits, this.flags, this.freqHz, this.fs, this.lo, this.hi, this.samples);
 
+  /// Кольорова складова (CHRM): комплексна огинаюча на піднесучій, у тих самих одиницях, що й samples.
+  Float32List? chromaRe, chromaIm;
+  double chromaFs = 0, fsc = 0, chromaDelayS = 0;
+
   final int bits;
   final int flags;
   final double freqHz;
@@ -25,6 +29,7 @@ class BasebandPacket {
 
   bool get piSeesVideo => flags & 1 != 0;
   bool get piInverted => flags & 2 != 0;
+  bool get hasChroma => chromaRe != null;
 
   static const headerSize = 32;
 
@@ -52,7 +57,29 @@ class BasebandPacket {
         out[i] = b[headerSize + i] * k;
       }
     }
-    return BasebandPacket._(bits, flags, freq, fs, lo, hi, out);
+    final p = BasebandPacket._(bits, flags, freq, fs, lo, hi, out);
+    final off = headerSize + (bits == 4 ? (n + 1) >> 1 : n);
+    if (flags & 4 != 0 && b.length >= off + 24 && b[off] == 0x43 && b[off + 1] == 0x48) {
+      final cfs = d.getFloat32(off + 4, Endian.little);
+      final fsc = d.getFloat32(off + 8, Endian.little);
+      final cs = d.getFloat32(off + 12, Endian.little);
+      final delay = d.getFloat32(off + 16, Endian.little);
+      final nc = math.min(d.getUint32(off + 20, Endian.little), (b.length - off - 24) ~/ 2);
+      final k = cs / math.max(hi - lo, 1.0); // Гц → частки розмаху яскравості
+      final re = Float32List(nc), im = Float32List(nc);
+      final raw = Int8List.sublistView(b, off + 24, off + 24 + 2 * nc);
+      for (var i = 0; i < nc; i++) {
+        re[i] = raw[2 * i] * k;
+        im[i] = raw[2 * i + 1] * k;
+      }
+      p
+        ..chromaRe = re
+        ..chromaIm = im
+        ..chromaFs = cfs
+        ..fsc = fsc
+        ..chromaDelayS = delay;
+    }
+    return p;
   }
 }
 
@@ -73,6 +100,9 @@ class VideoStats {
   String? scrambled;
   double deviationMhz = 0;
   double afcOffsetKhz = 0;
+
+  /// Якість кольору 0..1+ (відносна амплітуда сплеску); 0 — кадр без кольору.
+  double colorQuality = 0;
 }
 
 enum Polarity { auto, normal, inverted }
@@ -87,6 +117,10 @@ class BasebandDecoder {
 
   /// Підсилення контрасту для слабкої картинки (1..3).
   double gain = 1.0;
+
+  /// Колір PAL/NTSC (якщо модуль надсилає кольорову складову).
+  bool color = true;
+  double saturation = 1.0;
 
   Float32List? _acc;
   int _accW = 0, _accH = 0;
@@ -199,10 +233,84 @@ class BasebandDecoder {
       }
       if (descramble) stats.scrambled = _descramble(img, w, h);
       if (autoContrast) _stretch(img, onlyIfWeak: true);
+      if (color && p.hasChroma && stats.scrambled == null) {
+        final uv = _chroma(p, inv, pal, lines, first, vbi, usable, w, h, x0, dx, syncH, stats);
+        if (uv != null) return _finish(img, w, h, stats, uv.$1, uv.$2);
+      }
     } else {
       return _snow(v, fs, stats);
     }
     return _finish(img, w, h, stats);
+  }
+
+  // ---- колір ---------------------------------------------------------------------------
+  /// (U, V) кожного пікселя в одиницях «1 = білий» або null, якщо сплеск слабкий / не той стандарт.
+  (Float32List, Float32List)? _chroma(BasebandPacket p, bool inv, bool pal, List<double> lines, int first, int vbi,
+      int usable, int w, int h, double x0, double dx, double syncH, VideoStats stats) {
+    if ((p.fsc - (pal ? 4.43361875e6 : 3.579545e6)).abs() > 1e5) return null; // модуль ще не знає стандарт
+    final cre = p.chromaRe!, cim = p.chromaIm!;
+    final fs = p.fs, cfs = p.chromaFs, dl = p.chromaDelayS;
+    final sgnInv = inv ? -1.0 : 1.0;
+    double cpos(double lumaPos) => (lumaPos / fs + dl) * cfs;
+    // сплеск кожного рядка (центр ~6.7 мкс після початку синхроімпульсу)
+    final bre = Float64List(h), bim = Float64List(h), amps = <double>[];
+    for (var r = 0; r < h; r++) {
+      final li = (first + vbi + r) % usable;
+      final c = cpos(lines[li] + 6.7e-6 * fs);
+      final i = c.floor();
+      if (i < 0 || i + 1 >= cre.length) continue;
+      final f = c - i;
+      bre[r] = (cre[i] * (1 - f) + cre[i + 1] * f) * sgnInv;
+      bim[r] = (cim[i] * (1 - f) + cim[i + 1] * f) * sgnInv;
+      amps.add(math.sqrt(bre[r] * bre[r] + bim[r] * bim[r]));
+    }
+    final amp = _median(amps);
+    stats.colorQuality = (2 * amp / (0.5 * syncH)).clamp(0.0, 1.5);
+    if (stats.colorQuality < 0.25 || amp <= 0) return null; // слабкий сплеск — чорно-білий, як у телевізорі
+    final k = 0.15 / 0.7 / amp * saturation;
+    final uu = Float32List(w * h), vv = Float32List(w * h);
+    for (var r = 0; r < h; r++) {
+      final rp = r > 0 ? r - 1 : 0;
+      final a = math.atan2(bim[r], bre[r]);
+      double uAxis, sgn = 1;
+      if (pal) {
+        // середня фаза двох сусідніх сплесків — вісь −U; сплески ±45° довкола неї, знак — V-перемикач
+        final n0 = math.sqrt(bre[r] * bre[r] + bim[r] * bim[r]) + 1e-12;
+        final n1 = math.sqrt(bre[rp] * bre[rp] + bim[rp] * bim[rp]) + 1e-12;
+        final ax = math.atan2(bim[r] / n0 + bim[rp] / n1, bre[r] / n0 + bre[rp] / n1);
+        var d = a - ax;
+        d = math.atan2(math.sin(d), math.cos(d));
+        sgn = d > 0 ? -1.0 : 1.0;
+        uAxis = ax - math.pi;
+      } else {
+        uAxis = a - math.pi;
+      }
+      final cr = math.cos(-uAxis), ci = math.sin(-uAxis);
+      final li = (first + vbi + r) % usable;
+      final s = lines[li] + x0;
+      final row = r * w;
+      for (var x = 0; x < w; x++) {
+        final c = cpos(s + x * dx);
+        final i = c.floor();
+        if (i < 0 || i + 1 >= cre.length) continue;
+        final f = c - i;
+        final zr = (cre[i] * (1 - f) + cre[i + 1] * f) * sgnInv;
+        final zi = (cim[i] * (1 - f) + cim[i + 1] * f) * sgnInv;
+        uu[row + x] = (zr * cr - zi * ci) * k;
+        vv[row + x] = (zr * ci + zi * cr) * k * sgn;
+      }
+    }
+    if (pal) {
+      // лінія затримки PAL: середнє з попереднім рядком прибирає фазові спотворення (і «жалюзі»)
+      for (var r = h - 1; r > 0; r--) {
+        final a = r * w, b = a - w;
+        for (var x = 0; x < w; x++) {
+          uu[a + x] = (uu[a + x] + uu[b + x]) * 0.5;
+          vv[a + x] = (vv[a + x] + vv[b + x]) * 0.5;
+        }
+      }
+    }
+    return (uu, vv);
   }
 
   // ---- сніг: растр прямо з сигналу без синхронізації -------------------------------------
@@ -227,7 +335,7 @@ class BasebandDecoder {
     return _finish(img, w, h, stats);
   }
 
-  DecodedFrame _finish(Float32List img, int w, int h, VideoStats stats) {
+  DecodedFrame _finish(Float32List img, int w, int h, VideoStats stats, [Float32List? uu, Float32List? vv]) {
     // Накопичення (експоненційне середнє): шум падає ~√N, нерухома картинка проявляється
     if (accumulate > 1) {
       if (_acc == null || _accW != w || _accH != h) {
@@ -246,6 +354,18 @@ class BasebandDecoder {
       _acc = null;
     }
     final rgba = Uint8List(w * h * 4);
+    if (uu != null && vv != null) {
+      for (var i = 0, j = 0; i < img.length; i++, j += 4) {
+        final y = img[i];
+        final ry = vv[i] / 0.877, by = uu[i] / 0.493;
+        final gy = -0.509 * ry - 0.194 * by;
+        rgba[j] = ((y + ry) * 255).clamp(0, 255).toInt();
+        rgba[j + 1] = ((y + gy) * 255).clamp(0, 255).toInt();
+        rgba[j + 2] = ((y + by) * 255).clamp(0, 255).toInt();
+        rgba[j + 3] = 255;
+      }
+      return DecodedFrame(w, h, rgba, stats);
+    }
     for (var i = 0, j = 0; i < img.length; i++, j += 4) {
       final g = (img[i] * 255).clamp(0, 255).toInt();
       rgba[j] = g;

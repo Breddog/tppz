@@ -17,6 +17,15 @@
     fs      f32  частота відліків у пакеті, Гц
     lo, hi  f32  значення 0 і максимального коду в Гц девіації (для AFC/девіації)
     n       u32  кількість відліків
+Колір (flags bit2, лише якщо клієнт попросив color=1) — одразу після відліків яскравості:
+    magic   4s   b"CHRM"
+    fs_c    f32  частота відліків кольору, Гц (~1 МГц)
+    fsc     f32  піднесуча, на якій їх знято (PAL 4.43 / NTSC 3.58 МГц)
+    scale   f32  Гц на одиницю int8
+    delay   f32  зсув часу відліку кольору відносно яскравості з тим самим часом, с
+    n_c     u32  кількість комплексних відліків, далі n_c пар int8 (re, im)
+Модуль лише множить на піднесучу й проріджує (одна операція в тому ж проході C);
+фазу сплеску, PAL-перемикання, лінію затримки і YUV→RGB рахує телефон.
 """
 
 from __future__ import annotations
@@ -29,6 +38,10 @@ from .filters import fm_demod
 from .video import STD, _find_sync
 
 HEADER = struct.Struct("<4sBBHdfffI")
+CHROMA = struct.Struct("<4sffffI")
+CHROMA_FS = 1.0e6
+FSC = {"PAL": 4.43361875e6, "NTSC": 3.579545e6}
+_std_memory: dict[int, str] = {}       # частота (МГц) → останній визначений стандарт
 MAGIC = b"SDRB"
 MAX_FPS = 25              # більше полів/с не шлемо: стільки й показує екран, а мережа не нескінченна
 FIELD_S = 0.0205          # трохи більше за одне поле PAL (20 мс): телефон «прокручує» його до кадрового імпульсу
@@ -43,16 +56,33 @@ def decimation(fs: float, target_fs: float) -> int:
     return max(1, int(round(fs / target_fs)))
 
 
-def make_packet(iq: np.ndarray, fs: float, freq_hz: float, quality: str = "normal") -> tuple[bytes, dict]:
+def make_packet(iq: np.ndarray, fs: float, freq_hz: float, quality: str = "normal",
+                color: bool = False) -> tuple[bytes, dict]:
     """IQ (complex64) → пакет для телефона + легкий аналіз для автоскану/AFC на самому Pi."""
     target, bits = QUALITY.get(quality, QUALITY["normal"])
     k = decimation(fs, target)
     from .. import native
-    v = native.fm_baseband(iq, fs, k)          # C: детектор + проріджування в один прохід
-    if v is None:                               # немає прискорення — numpy
-        hz = fm_demod(iq, fs)
-        n = (len(hz) // k) * k
-        v = hz[:n].reshape(-1, k).mean(axis=1) if k > 1 else hz[:n]
+    chroma = None
+    kc = decimation(fs, CHROMA_FS)
+    fsc = FSC[_std_memory.get(int(freq_hz // 1e6), "PAL")]
+    color = color and fs >= 2.2 * fsc       # піднесуча має влазити в смугу
+    if color:
+        r = native.fm_chroma(iq, fs, k, kc, fsc)
+        if r is None:
+            hz = fm_demod(iq, fs)
+            n = (len(hz) // kc) * kc
+            lo = np.exp(-1j * 2 * np.pi * fsc / fs * np.arange(len(hz))).astype(np.complex64)
+            chroma = (hz[:n] * lo[:n]).reshape(-1, kc).mean(axis=1)
+            nl = (len(hz) // k) * k
+            v = hz[:nl].reshape(-1, k).mean(axis=1) if k > 1 else hz[:nl]
+        else:
+            v, chroma = r
+    else:
+        v = native.fm_baseband(iq, fs, k)          # C: детектор + проріджування в один прохід
+        if v is None:                               # немає прискорення — numpy
+            hz = fm_demod(iq, fs)
+            n = (len(hz) // k) * k
+            v = hz[:n].reshape(-1, k).mean(axis=1) if k > 1 else hz[:n]
     fs_out = fs / k
     sub = v[::4]
     p_lo, p_hi, med = np.percentile(sub, [0.5, 99.5, 50])
@@ -84,7 +114,18 @@ def make_packet(iq: np.ndarray, fs: float, freq_hz: float, quality: str = "norma
     if is_video:
         line_s = sync.line_samples / fs_out
         std = "PAL" if abs(line_s - STD["PAL"]["line_s"]) < abs(line_s - STD["NTSC"]["line_s"]) else "NTSC"
-    flags = (1 if is_video else 0) | (2 if pol < 0 else 0)
+    if std:
+        _std_memory[int(freq_hz // 1e6)] = std
+    tail = b""
+    if chroma is not None and is_video:
+        c = np.concatenate([chroma.real, chroma.imag])
+        cs = max(float(np.percentile(np.abs(c[::7]), 99.8)) / 120.0, 1.0)
+        ci = np.empty(2 * len(chroma), np.int8)
+        ci[0::2] = np.clip(np.round(chroma.real / cs), -127, 127)
+        ci[1::2] = np.clip(np.round(chroma.imag / cs), -127, 127)
+        tail = CHROMA.pack(b"CHRM", float(fs / kc), float(fsc), cs, float((k - kc) / (2 * fs)), len(chroma)) \
+            + ci.tobytes()
+    flags = (1 if is_video else 0) | (2 if pol < 0 else 0) | (4 if tail else 0)
     head = HEADER.pack(MAGIC, 1, bits, flags, float(freq_hz), float(fs_out), lo, hi, len(q))
     info = {
         "is_video": bool(is_video),
@@ -96,9 +137,10 @@ def make_packet(iq: np.ndarray, fs: float, freq_hz: float, quality: str = "norma
         "snr_db": 0.0,
         "decoder": "phone",
         "fs_out": round(fs_out),
-        "kbps": round(len(payload) * 8 * MAX_FPS / 1000),   # найбільший потік, кбіт/с
+        "kbps": round((len(payload) + len(tail)) * 8 * MAX_FPS / 1000),   # найбільший потік, кбіт/с
     }
-    return head + payload, info
+    info["color"] = bool(tail)
+    return head + payload + tail, info
 
 
 def parse_packet(data: bytes) -> tuple[dict, np.ndarray]:

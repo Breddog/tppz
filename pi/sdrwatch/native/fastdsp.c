@@ -69,3 +69,51 @@ long fm_baseband_cs8(const int8_t *iq, long n, long decim, float scale, float *p
     prev[1] = pq;
     return k;
 }
+
+/* Колір для телефона: ЧМ-детектор на повній частоті + два виходи за один прохід:
+ *   luma   — середнє по kl відліків (яскравість, як fm_baseband);
+ *   chroma — композит × e^(−jωt) на піднесучій (w = 2π·fsc/fs), середнє по kc → комплексні (U,V)
+ *            у системі координат генератора; фазу кожного рядка телефон бере зі сплеску.
+ * Генератор — обертовий вектор із перенормуванням (без sin/cos на кожен відлік).
+ * Повертає кількість luma-виходів; chroma — n/kc пар (re, im). */
+long fm_chroma(const float *iq, long n, long kl, long kc, float scale, float w, float *prev,
+               float *luma, float *chroma)
+{
+    float pi_ = prev[0], pq = prev[1];
+    float lr = 1.0f, li = 0.0f;                 /* e^(−jωt) */
+    const float cr = cosf(w), ci = -sinf(w);
+    long k = 0, kk = 0, m = 0, mc = 0;
+    float acc = 0.0f, ar = 0.0f, ai = 0.0f;
+    for (long i = 0; i < n; i++) {
+        float I = iq[2 * i], Q = iq[2 * i + 1];
+        float re = I * pi_ + Q * pq;
+        float im = Q * pi_ - I * pq;
+        float v = fast_atan2f(im, re);
+        pi_ = I;
+        pq = Q;
+        acc += v;
+        ar += v * lr;
+        ai += v * li;
+        float nr = lr * cr - li * ci;
+        li = lr * ci + li * cr;
+        lr = nr;
+        if (++m == kl) {
+            luma[k++] = acc * scale / (float)kl;
+            acc = 0.0f;
+            m = 0;
+        }
+        if (++mc == kc) {
+            chroma[2 * kk] = ar * scale / (float)kc;
+            chroma[2 * kk + 1] = ai * scale / (float)kc;
+            kk++;
+            ar = ai = 0.0f;
+            mc = 0;
+            float g = 1.5f - 0.5f * (lr * lr + li * li);   /* перенормування вектора генератора */
+            lr *= g;
+            li *= g;
+        }
+    }
+    prev[0] = pi_;
+    prev[1] = pq;
+    return k;
+}

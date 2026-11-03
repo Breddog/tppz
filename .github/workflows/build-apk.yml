@@ -62,7 +62,7 @@ jobs:
 
       - run: flutter pub get
       - run: flutter analyze
-      - run: flutter test test/baseband_decoder_test.dart
+      - run: flutter test test/baseband_decoder_test.dart test/decoder_worker_test.dart
       # Номер збірки = номер запуску CI: кожна нова APK має більший versionCode,
       # а в застосунку видно «збірка N».
       - name: Зібрати APK

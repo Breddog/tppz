@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api.dart';
 import '../live.dart';
 import '../video/baseband_decoder.dart';
+import '../video/decoder_worker.dart';
 
 /// Вкладка «Відео» — ГОЛОВНИЙ екран: живе відео в реальному часі.
 ///
@@ -42,21 +43,22 @@ class VideoTab extends StatefulWidget {
 class _VideoTabState extends State<VideoTab> {
   WebSocketChannel? _ws;
   StreamSubscription? _sub;
-  String _src =
-      'baseband'; // 'baseband' — Ч/Б, декодує телефон | 'color' — колір (модуль, MJPEG) | 'jpeg' — старий модуль
-  double _sat = 1.0; // насиченість кольору
+  String _src = 'baseband'; // 'baseband' — декодує телефон | 'jpeg' — старий модуль (готові кадри)
+  bool _color = true; // кольорова складова від модуля, кадр збирає телефон
+  bool _gotChroma = false;
   DateTime? _wsSince;
   DateTime? _lastPacket;
   Timer? _fallbackTimer;
 
   // Декодування на телефоні
-  final _dec = BasebandDecoder();
+  final _dec = BasebandDecoder(); // лише налаштування: декодує окремий потік (_worker)
+  late final _worker = DecoderWorker(_dec)..onFrame = _onFrame;
   final _img = ValueNotifier<ui.Image?>(null);
   final _jpeg = ValueNotifier<Uint8List?>(null);
   VideoStats? _stats;
-  bool _busy = false;
+  bool _uploading = false;
   String _quality = 'normal';
-  int _frames = 0, _dropped = 0, _bytes = 0;
+  int _frames = 0, _bytes = 0;
   double _fps = 0, _kbps = 0;
   DateTime _fpsT = DateTime.now();
 
@@ -104,6 +106,7 @@ class _VideoTabState extends State<VideoTab> {
   @override
   void initState() {
     super.initState();
+    _worker.start();
     _loadGrids();
     widget.watchRequest?.addListener(_onWatchRequest);
   }
@@ -131,6 +134,7 @@ class _VideoTabState extends State<VideoTab> {
     }
     _tuneDebounce?.cancel();
     _close();
+    _worker.dispose();
     _img.value?.dispose();
     super.dispose();
   }
@@ -141,7 +145,7 @@ class _VideoTabState extends State<VideoTab> {
     _wsSince ??= DateTime.now();
     try {
       if (_src == 'baseband') {
-        _ws = WebSocketChannel.connect(Uri.parse('${widget.api.wsUrl('/ws/baseband')}&quality=$_quality'));
+        _ws = WebSocketChannel.connect(Uri.parse('${widget.api.wsUrl('/ws/baseband')}&quality=$_quality&color=${_color ? 1 : 0}'));
         _sub = _ws!.stream.listen(_onBaseband, onDone: _close, onError: (_) => _close());
         // Немає жодного пакета за 4 с, а модуль на зв'язку — це старий модуль: беремо JPEG
         _fallbackTimer?.cancel();
@@ -152,9 +156,7 @@ class _VideoTabState extends State<VideoTab> {
           }
         });
       } else {
-        final path = _src == 'color' ? '/ws/videoc' : '/ws/video';
-        final extra = _src == 'color' ? '&sat=${_sat.toStringAsFixed(2)}&q=70' : '';
-        _ws = WebSocketChannel.connect(Uri.parse('${widget.api.wsUrl(path)}$extra'));
+        _ws = WebSocketChannel.connect(Uri.parse(widget.api.wsUrl('/ws/video')));
         _sub = _ws!.stream.listen(
           (data) {
             if (data is! List<int>) return;
@@ -188,24 +190,24 @@ class _VideoTabState extends State<VideoTab> {
   void _onBaseband(dynamic data) {
     if (data is! List<int>) return;
     _count(data.length);
-    // Реальний час важливіший за кожне поле: поки попереднє ще малюється — нове пропускаємо
-    if (_busy) {
-      _dropped++;
-      return;
-    }
-    final p = BasebandPacket.parse(data is Uint8List ? data : Uint8List.fromList(data));
-    if (p == null) return;
-    _busy = true;
-    final f = _dec.decode(p);
+    // Декодує окремий потік; якщо він ще зайнятий — тримається лише найсвіжіше поле
+    _worker.push(data is Uint8List ? data : Uint8List.fromList(data));
+  }
+
+  void _onFrame(DecodedFrame f, double freqHz, bool hasChroma) {
+    if (!mounted) return;
+    if (_uploading) return; // попередній кадр ще не на екрані — цей пропускаємо
+    _uploading = true;
+    _gotChroma = hasChroma;
     ui.decodeImageFromPixels(f.rgba, f.width, f.height, ui.PixelFormat.rgba8888, (img) {
-      _busy = false;
+      _uploading = false;
       if (!mounted) {
         img.dispose();
         return;
       }
       final old = _img.value;
       _img.value = img;
-      _maybeThumb(f, p.freqHz);
+      _maybeThumb(f, freqHz);
       old?.dispose();
       final wasLocked = _stats?.locked;
       _stats = f.stats;
@@ -279,7 +281,7 @@ class _VideoTabState extends State<VideoTab> {
   void _tune(double mhz, {bool immediate = false}) {
     _freqMhz = mhz.clamp(1, 7250);
     _mhzCtl.text = _freqMhz.toStringAsFixed(1);
-    _dec.resetAccumulation();
+    _worker.resetAccumulation();
     setState(() {});
     void send() {
       _lastTune = DateTime.now();
@@ -443,8 +445,9 @@ class _VideoTabState extends State<VideoTab> {
                           'скремблювання: ${s?.scrambled ?? pv['scrambled']}',
                         '${_fps.toStringAsFixed(0)} кадр/с · ${(_kbps / 1000).toStringAsFixed(1)} Мбіт/с'
                             '${switch (_src) {
-                              'baseband' => ' · Ч/Б, декодує телефон',
-                              'color' => ' · колір, декодує модуль',
+                              'baseband' => _color && _gotChroma && (s?.colorQuality ?? 0) > 0
+                                  ? ' · колір, декодує телефон'
+                                  : ' · декодує телефон',
                               _ => ' · старий модуль',
                             }}',
                         if (_dec.accumulate > 1) 'накопичення ×${_dec.accumulate}',
@@ -727,51 +730,43 @@ class _VideoTabState extends State<VideoTab> {
               initiallyExpanded: false,
               title: const Text('Зображення', style: TextStyle(fontWeight: FontWeight.bold)),
               subtitle: Text(
-                _src == 'color'
-                    ? 'колір (модуль, MJPEG) · насиченість ×${_sat.toStringAsFixed(1)}'
-                    : 'Ч/Б (телефон) · накопичення ×${_dec.accumulate} · ${_qualities[_quality]}',
+                '${_color ? 'колір' : 'Ч/Б'} · накопичення ×${_dec.accumulate} · ${_qualities[_quality]}',
                 style: const TextStyle(fontSize: 12),
               ),
               childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
               expandedCrossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SegmentedButton<String>(
+                SegmentedButton<bool>(
                   segments: const [
-                    ButtonSegment(
-                      value: 'baseband',
-                      icon: Icon(Icons.contrast, size: 18),
-                      label: Text('Ч/Б (телефон)'),
-                    ),
-                    ButtonSegment(value: 'color', icon: Icon(Icons.palette, size: 18), label: Text('Колір (модуль)')),
+                    ButtonSegment(value: false, icon: Icon(Icons.contrast, size: 18), label: Text('Ч/Б')),
+                    ButtonSegment(value: true, icon: Icon(Icons.palette, size: 18), label: Text('Колір')),
                   ],
-                  selected: {_src},
+                  selected: {_color},
                   onSelectionChanged: (v) {
-                    setState(() {
-                      _src = v.first;
-                      _jpeg.value = null;
-                    });
+                    setState(() => _color = v.first);
                     _reconnect();
                   },
                 ),
                 Text(
-                  _src == 'color'
-                      ? 'Колір PAL/NTSC розшифровує модуль на повній частоті й шле кадри JPEG (~3 Мбіт/с). '
-                            'На слабкому сигналі колір зникає (як у телевізорах).'
-                      : 'Найменша затримка; накопичення кадрів для слабких сигналів. Без кольору.',
+                  _color
+                      ? (_gotChroma || _lastPacket == null
+                            ? 'Колір PAL/NTSC збирає телефон; модуль лише виділяє кольорову складову. '
+                                  'На слабкому сигналі колір зникає (як у телевізорах).'
+                            : 'Модуль не надсилає кольорову складову — оновіть модуль («Керування» → «Оновлення»).')
+                      : 'Найменший потік даних (≈ удвічі менше, ніж із кольором).',
                   style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
-                if (_src == 'color')
+                if (_color)
                   Row(
                     children: [
-                      SizedBox(width: 150, child: Text('Насиченість ×${_sat.toStringAsFixed(1)}')),
+                      SizedBox(width: 150, child: Text('Насиченість ×${_dec.saturation.toStringAsFixed(1)}')),
                       Expanded(
                         child: Slider(
-                          value: _sat,
+                          value: _dec.saturation,
                           min: 0,
                           max: 2.5,
                           divisions: 25,
-                          onChanged: (v) => setState(() => _sat = v),
-                          onChangeEnd: (_) => _reconnect(),
+                          onChanged: (v) => setState(() => _dec.saturation = v),
                         ),
                       ),
                     ],
@@ -851,9 +846,9 @@ class _VideoTabState extends State<VideoTab> {
                     value: _dec.autoContrast,
                     onChanged: (v) => setState(() => _dec.autoContrast = v),
                   ),
-                  if (_dropped > 0)
+                  if (_worker.dropped > 0)
                     Text(
-                      'Пропущено полів (телефон не встигав): $_dropped',
+                      'Пропущено полів (телефон не встигав): ${_worker.dropped}',
                       style: const TextStyle(color: Colors.white38, fontSize: 11),
                     ),
                 ],

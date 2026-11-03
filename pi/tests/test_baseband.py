@@ -51,3 +51,25 @@ def test_dump_sample_for_phone_tests(tmp_path):
     # Зразок для перевірки декодера застосунку (mobile/test/baseband_sample.bin)
     pkt, _ = baseband.make_packet(capture(), FS, 5800e6, "normal")
     assert pkt[:4] == b"SDRB"
+
+
+def test_color_component_for_phone():
+    """color=True: у пакеті є кольорова складова (CHRM) з піднесучою PAL; без color — немає."""
+    import struct
+
+    from sdrwatch.dsp import baseband
+    from sdrwatch.sources.simulated import Emitter, SimulatedSource
+    s = SimulatedSource([Emitter(5800e6, "analog_color", power_dbm=-55)], noise_dbfs=-62)
+    s.set_sample_rate(20e6)
+    s.set_gain(32, 30, False)
+    s.tune(5800e6)
+    iq = s.read(int(20e6 * baseband.FIELD_S))
+    plain, _ = baseband.make_packet(iq, 20e6, 5800e6, "normal")
+    pkt, info = baseband.make_packet(iq, 20e6, 5800e6, "normal", color=True)
+    assert info["color"] and not (struct.unpack_from("<H", plain, 6)[0] & 4)
+    flags = struct.unpack_from("<H", pkt, 6)[0]
+    n = struct.unpack_from("<I", pkt, 28)[0]
+    off = baseband.HEADER.size + n
+    magic, cfs, fsc, scale, delay, nc = baseband.CHROMA.unpack_from(pkt, off)
+    assert flags & 4 and magic == b"CHRM" and abs(fsc - 4.43361875e6) < 1 and abs(cfs - 1e6) < 1
+    assert len(pkt) == off + baseband.CHROMA.size + 2 * nc and len(pkt) < 2 * len(plain)

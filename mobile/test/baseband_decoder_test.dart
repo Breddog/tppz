@@ -46,4 +46,33 @@ void main() {
       expect(f.stats.locked, isTrue);
     }
   });
+
+  test('PAL колір: смуги правильних кольорів (кадр збирає телефон)', () {
+    final p = load('bb_color_pal');
+    expect(p.hasChroma, isTrue);
+    final f = BasebandDecoder().decode(p);
+    expect(f.stats.locked, isTrue);
+    expect(f.stats.colorQuality, greaterThan(0.5));
+    List<double> bar(int k) {
+      final x = ((k + 0.5) * f.width / 8).floor();
+      final m = [0.0, 0.0, 0.0];
+      for (var r = 100; r < 200; r++) {
+        for (var c = 0; c < 3; c++) {
+          m[c] += f.rgba[(r * f.width + x) * 4 + c] / 100;
+        }
+      }
+      return m;
+    }
+
+    final yellow = bar(1), red = bar(5), blue = bar(6), green = bar(3);
+    expect(yellow[2], lessThan(yellow[0] - 40)); // жовтий: мало синього
+    expect(red[0], greaterThan(red[1] + 60)); // червоний
+    expect(blue[2], greaterThan(blue[0] + 60)); // синій
+    expect(green[1], greaterThan(green[0] + 40)); // зелений
+  });
+
+  test('без кольорової складової — як раніше, сірий', () {
+    final f = BasebandDecoder().decode(load('bb_pal'));
+    expect(f.rgba[(150 * f.width + 50) * 4], f.rgba[(150 * f.width + 50) * 4 + 2]);
+  });
 }
