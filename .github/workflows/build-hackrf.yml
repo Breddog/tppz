@@ -1,0 +1,46 @@
+name: Прошивка HackRF
+
+on:
+  push:
+    branches: [master, "claude/**"]
+    paths: ["hackrf/**", ".github/workflows/build-hackrf.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Інструменти
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake python3-yaml
+      - name: Офіційний код HackRF
+        run: |
+          TAG=$(cat hackrf/UPSTREAM_TAG)
+          git clone --depth 1 --branch "$TAG" --recurse-submodules --shallow-submodules \
+            https://github.com/greatscottgadgets/hackrf.git upstream
+          echo "FW_VERSION=${TAG#v}" >> $GITHUB_ENV
+      - name: Збірка прошивки (HackRF One, усі ревізії)
+        run: |
+          mkdir -p upstream/firmware/build && cd upstream/firmware/build
+          cmake .. -DBOARD=HACKRF_ONE
+          make -j"$(nproc)"
+          find . -name 'hackrf_usb.bin'
+      - name: Файли релізу
+        run: |
+          mkdir -p dist
+          cp upstream/firmware/build/hackrf_usb/hackrf_usb.bin dist/hackrf_one_usb.bin
+          cp upstream/firmware/build/hackrf_usb/hackrf_usb.dfu dist/hackrf_one_usb.dfu 2>/dev/null || true
+          (cd dist && sha256sum hackrf_one_usb.bin > hackrf_one_usb.bin.sha256)
+          echo "$FW_VERSION" > dist/VERSION.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hackrf-${{ github.run_number }}
+          name: Прошивка HackRF ${{ env.FW_VERSION }} (збірка ${{ github.run_number }})
+          prerelease: true
+          files: dist/*
+          body: |
+            Офіційна прошивка HackRF One ${{ env.FW_VERSION }} (без змін), зібрана для оновлення з застосунку.
+            Оновлення: модуль → «Керування» → «Оновлення» → «Прошити HackRF». Опис: hackrf/README.md.

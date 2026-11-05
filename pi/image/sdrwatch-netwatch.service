@@ -1,0 +1,13 @@
+[Unit]
+Description=SDR Watch — резервне підключення до точки доступу телефону (sdrdetect)
+After=NetworkManager.service sdrwatch-firstboot.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sdrwatch-netwatch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

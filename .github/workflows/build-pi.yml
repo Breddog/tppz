@@ -1,0 +1,112 @@
+name: Прошивка Raspberry Pi
+
+on:
+  push:
+    branches: [master, "claude/**"]
+    paths: ["pi/**", ".github/workflows/build-pi.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install numpy fastapi "uvicorn[standard]" pillow qrcode pytest httpx
+      - run: cd pi && python -m pytest -q
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Пакет-інсталятор
+        run: |
+          mkdir -p dist sdrwatch-pi
+          cp -r pi/sdrwatch pi/systemd pi/image pi/install.sh pi/requirements.txt pi/config.example.json sdrwatch-pi/
+          cp docs/INSTALL_PI.md sdrwatch-pi/ 2>/dev/null || true
+          rm -rf sdrwatch-pi/image/stage-sdrwatch
+          echo "pi-${{ github.run_number }}" > sdrwatch-pi/BUILD
+          tar czf dist/sdrwatch-pi.tar.gz sdrwatch-pi
+          (cd dist && sha256sum sdrwatch-pi.tar.gz > sdrwatch-pi.tar.gz.sha256)
+          cp pi/sdrwatch/data/channels.json dist/channels.json
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pi-${{ github.run_number }}
+          name: Прошивка Raspberry Pi (збірка ${{ github.run_number }})
+          prerelease: true
+          files: |
+            dist/sdrwatch-pi.tar.gz
+            dist/sdrwatch-pi.tar.gz.sha256
+            dist/channels.json
+          body: |
+            **sdrwatch-pi-image.img.xz** — готовий образ SD-карти (Raspberry Pi OS Lite 64-bit + SDR Watch).
+            Запишіть його Raspberry Pi Imager або balenaEtcher, відредагуйте `sdrwatch.txt` на розділі `bootfs`
+            (Wi-Fi, назва), вставте карту й увімкніть Pi. Образ з'являється тут приблизно через годину після пакета.
+
+            **sdrwatch-pi.tar.gz** — інсталятор для вже встановленої Raspberry Pi OS 64-bit:
+            `tar xzf sdrwatch-pi.tar.gz && sudo ./sdrwatch-pi/install.sh`
+
+            Інструкція: docs/INSTALL_PI.md у репозиторії.
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Підготувати стадію pi-gen
+        run: |
+          mkdir -p stage-sdrwatch
+          cp -r pi/image/stage-sdrwatch/. stage-sdrwatch/
+          F=stage-sdrwatch/00-install/files
+          mkdir -p $F
+          cp -r pi/sdrwatch pi/systemd pi/image pi/install.sh pi/requirements.txt $F/
+          rm -rf $F/image/stage-sdrwatch
+          echo "pi-${{ github.run_number }}" > $F/BUILD
+          PW=$(openssl rand -hex 16)
+          echo "::add-mask::$PW"
+          echo "PW=$PW" >> $GITHUB_ENV
+      - name: Звільнити місце на диску
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/.ghcup /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          df -h /
+      - uses: usimd/pi-gen-action@v1
+        id: build
+        with:
+          image-name: sdrwatch-pi-image
+          stage-list: stage0 stage1 stage2 ./stage-sdrwatch
+          pi-gen-version: arm64
+          compression: xz
+          hostname: sdrwatch
+          username: sdr
+          # Випадковий пароль: SSH вимкнено, доступ вмикається через SSH_PASSWORD у sdrwatch.txt
+          password: ${{ env.PW }}
+          disable-first-boot-user-rename: 1
+          enable-ssh: 0
+          locale: en_US.UTF-8
+          timezone: Europe/Kyiv
+          keyboard-keymap: us
+          keyboard-layout: English (US)
+          wpa-country: UA
+          increase-runner-disk-size: false
+      - name: Перейменувати образ
+        run: |
+          mkdir -p dist
+          cp "${{ steps.build.outputs.image-path }}" dist/sdrwatch-pi-image.img.xz
+          sha256sum dist/sdrwatch-pi-image.img.xz > dist/sdrwatch-pi-image.img.xz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pi-${{ github.run_number }}
+          name: Прошивка Raspberry Pi (збірка ${{ github.run_number }})
+          prerelease: true
+          files: |
+            dist/sdrwatch-pi-image.img.xz
+            dist/sdrwatch-pi-image.img.xz.sha256

@@ -1,0 +1,12 @@
+[Unit]
+Description=SDR Watch — налаштування з sdrwatch.txt на SD-карті
+After=NetworkManager.service
+Before=sdrwatch.service
+ConditionPathExists=/boot/firmware/sdrwatch.txt
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sdrwatch-firstboot
+
+[Install]
+WantedBy=multi-user.target
