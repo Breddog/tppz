@@ -5,11 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../analysis/frame_analysis.dart';
 import '../direct/hackrf_direct.dart';
 import '../models.dart';
 import '../video/baseband_decoder.dart';
 import '../video/decoder_worker.dart';
 import '../widgets/spectrum_view.dart';
+import 'analysis_bar.dart';
 import 'video_tab.dart' show FullscreenVideo;
 
 /// Режим «HackRF напряму»: HackRF під'єднано до телефону через USB OTG, Raspberry Pi не потрібен.
@@ -73,6 +75,7 @@ class _DirectScreenState extends State<DirectScreen> {
   void initState() {
     super.initState();
     _worker.start();
+    FindingsStore.instance.load();
     _pSub = hr.packets.listen(_worker.push);
     _sSub = hr.spectra.listen((f) {
       _spec.value = f;
@@ -160,6 +163,7 @@ class _DirectScreenState extends State<DirectScreen> {
   void _onFrame(DecodedFrame f, double freqHz, bool hasChroma) {
     if (!mounted) return;
     _probeHook?.call(f.stats, freqHz);
+    AutoAnalyzer.instance.feed(f, freqHz);
     if (f.stats.locked && f.stats.standard != null) {
       // підказати Java піднесучу для кольору (PAL/NTSC)
       final fsc = f.stats.standard == 'NTSC' ? 3.579545e6 : 4.43361875e6;
@@ -330,6 +334,7 @@ class _DirectScreenState extends State<DirectScreen> {
   }
 
   Future<void> _onFound(double hz) async {
+    AutoAnalyzer.instance.found(hz, source: 'HackRF напряму');
     final key = (hz / 1e6).round();
     final e = _found[key];
     if (e == null) {
@@ -458,6 +463,7 @@ class _DirectScreenState extends State<DirectScreen> {
             style: const TextStyle(fontSize: 11.5, color: Colors.white60),
           ),
         ),
+        AnalysisBar(freqHz: () => _freqMhz * 1e6, source: 'HackRF напряму', enabled: hr.opened),
         // ---- частота ----
         Card(
           margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),

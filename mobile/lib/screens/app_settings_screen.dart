@@ -8,6 +8,7 @@ import '../background.dart';
 import '../device_store.dart';
 import '../notifications.dart';
 import '../notify_settings.dart';
+import 'analysis_settings.dart';
 
 class AppSettingsScreen extends StatefulWidget {
   const AppSettingsScreen({super.key});
@@ -78,6 +79,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           if (_ns != null) ..._notifySection(_ns!, store),
           const Divider(),
           ..._updateSection(),
+          const Divider(),
+          const AnalysisSettingsSection(),
           const Divider(),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 8, 16, 4),

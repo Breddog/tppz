@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'analysis/frame_analysis.dart';
 import 'announcements.dart';
 import 'api.dart';
 import 'app_update.dart';
@@ -34,6 +35,7 @@ Future<void> main() async {
   await Notifications.init(requestPermission: true);
   await _initClientId();
   await SpectrumPrefs.load();
+  await AnalysisSettings.load();
   await NetBind.wifi(); // Wi-Fi без інтернету (модуль/точка доступу) — запити до модуля йдуть через Wi-Fi
   final store = DeviceStore();
   await store.load();

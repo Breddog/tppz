@@ -10,6 +10,8 @@ import '../api.dart';
 import '../live.dart';
 import '../video/baseband_decoder.dart';
 import '../video/decoder_worker.dart';
+import '../analysis/frame_analysis.dart';
+import 'analysis_bar.dart';
 
 /// Вкладка «Відео» — ГОЛОВНИЙ екран: живе відео в реальному часі.
 ///
@@ -196,6 +198,7 @@ class _VideoTabState extends State<VideoTab> {
 
   void _onFrame(DecodedFrame f, double freqHz, bool hasChroma) {
     if (!mounted) return;
+    AutoAnalyzer.instance.feed(f, freqHz);
     if (_uploading) return; // попередній кадр ще не на екрані — цей пропускаємо
     _uploading = true;
     _gotChroma = hasChroma;
@@ -399,6 +402,11 @@ class _VideoTabState extends State<VideoTab> {
       _scanMode = auto['mode'] as String? ?? _scanMode;
       _circular = auto['circular'] as bool? ?? _circular;
       _dwell = ((auto['dwell_s'] as num?)?.toDouble() ?? _dwell).clamp(1, 15);
+    }
+    if (auto != null && auto['dwelling'] == true && w?['freq_hz'] != null && _src == 'baseband') {
+      // автоскан модуля показує знайдене відео — знімок найкращого кадру й розпізнавання
+      final hz = (w!['freq_hz'] as num).toDouble();
+      WidgetsBinding.instance.addPostFrameCallback((_) => AutoAnalyzer.instance.found(hz, source: 'модуль'));
     }
     final hasPicture = _src == 'baseband' ? _img.value != null : _jpeg.value != null;
 
@@ -709,6 +717,7 @@ class _VideoTabState extends State<VideoTab> {
           ),
         ),
 
+        AnalysisBar(freqHz: () => _freqMhz * 1e6, source: widget.api.device.name),
         // ---- знайдене: відео (з мініатюрами) і голос ----
         if (auto != null && (auto['found'] as List).isNotEmpty)
           _FoundList(

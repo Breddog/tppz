@@ -44,6 +44,10 @@ dependencies:
   app_settings: ^9.0.1
   image_picker: ^1.2.4
   flutter_pcm_sound: ^3.3.3
+  google_mlkit_text_recognition: ^0.17.1
+  google_mlkit_image_labeling: ^0.16.1
+  flutter_tts: ^4.2.5
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
